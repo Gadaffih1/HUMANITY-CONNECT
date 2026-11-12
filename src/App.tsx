@@ -6,7 +6,6 @@ import {
   X,
   LogOut,
   Lock,
-  BookOpen,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import {
@@ -45,24 +44,11 @@ const HumanityConnectShell: React.FC = () => {
     fundName?: string;
   } | null>(null);
 
-  const [docsOpen, setDocsOpen] = useState(false);
-  const [apiDocs, setApiDocs] = useState<any>(null);
-
   const openAuth = (mode: 'login' | 'register', role = 'SUPPORTIVE') => {
     setAuthMode(mode);
     setPresetRole(role);
     setRoute('auth');
     setMobileMenuOpen(false);
-  };
-
-  const handleOpenDocs = async () => {
-    setDocsOpen(true);
-    try {
-      const res = await fetch('/api/public/docs').then((r) => r.json());
-      setApiDocs(res);
-    } catch {
-      // Ignore fetch failure in modal
-    }
   };
 
   const renderActivePortal = () => {
@@ -143,13 +129,6 @@ const HumanityConnectShell: React.FC = () => {
                 Security & MFA
               </button>
             )}
-            <button
-              type="button"
-              onClick={handleOpenDocs}
-              className="whitespace-nowrap transition-colors hover:text-[#287A59]"
-            >
-              API & Governance
-            </button>
           </nav>
 
           {/* Zone 3: Single Primary Action / Multi-Role Switcher */}
@@ -271,16 +250,6 @@ const HumanityConnectShell: React.FC = () => {
                 )}
               </>
             )}
-            <button
-              type="button"
-              onClick={() => {
-                setMobileMenuOpen(false);
-                handleOpenDocs();
-              }}
-              className="w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#EAE6DC]/60"
-            >
-              API & Governance Docs
-            </button>
 
             <div className="pt-2 border-t border-[#102E36]/10 flex gap-2">
               {user ? (
@@ -371,12 +340,7 @@ const HumanityConnectShell: React.FC = () => {
               Sponsorship Platform · Child Safeguarding & Data Protection Compliant
             </span>
           </div>
-          <div className="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
-            <div className="flex items-center gap-4">
-              <button type="button" onClick={handleOpenDocs} className="hover:text-[#102E36] underline">
-                API & Compliance Docs
-              </button>
-            </div>
+          <div className="flex items-center justify-end w-full sm:w-auto">
             <button
               type="button"
               aria-label="Super Admin Login"
@@ -487,39 +451,6 @@ const HumanityConnectShell: React.FC = () => {
             </GlossyButton>
           </div>
         </form>
-      </ModalDialog>
-
-      {/* API & Governance Documentation Modal */}
-      <ModalDialog
-        open={docsOpen}
-        title="Humanity Connect API & Safeguarding Architecture"
-        subtitle="Verified Pathways, Daraja M-Pesa Endpoints & Governance Guarantees"
-        onClose={() => setDocsOpen(false)}
-      >
-        <div className="space-y-4 text-xs text-[#4A636A]">
-          <div className="flex items-center gap-2 text-[#102E36] font-bold">
-            <BookOpen className="w-4 h-4 text-[#287A59]" />
-            <span>Security & Financial Guarantees</span>
-          </div>
-          <ul className="list-disc pl-5 space-y-1">
-            {(apiDocs?.securityPrinciples || []).map((p: string) => (
-              <li key={p}>{p}</li>
-            ))}
-          </ul>
-          <div className="font-bold text-[#102E36] pt-2">Key Backend Endpoints</div>
-          <div className="space-y-1.5 max-h-60 overflow-y-auto">
-            {(apiDocs?.endpoints || []).map((ep: any) => (
-              <div key={ep.path} className="p-2.5 rounded-xl bg-white border border-[#102E36]/10">
-                <div className="font-mono-num font-bold text-[#102E36]">
-                  {ep.method} {ep.path}
-                </div>
-                <div>
-                  {ep.auth} · {ep.summary}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
       </ModalDialog>
     </div>
   );
