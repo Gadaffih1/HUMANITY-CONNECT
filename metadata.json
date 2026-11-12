@@ -1,0 +1,6 @@
+{
+  "name": "Humanity Connect",
+  "description": "Together We Can Change Lives — A humanitarian support, direct sponsorship, central relief funding, and community empowerment platform launching in Kenya.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
