@@ -167,7 +167,7 @@ operationsRouter.get('/projects', async (_req: AuthRequest, res) => {
 
 operationsRouter.post(
   '/projects',
-  requireRole('SUPER_ADMIN', 'FIELD_OFFICER', 'WELL_WISHER'),
+  requireRole('SUPER_ADMIN', 'FIELD_OFFICER', 'COUNTY_REPRESENTATIVE', 'WELL_WISHER'),
   async (req: AuthRequest, res) => {
     const schema = z.object({
       fundId: z.string().uuid(),
@@ -201,7 +201,7 @@ operationsRouter.post(
 // Safeguarding DPIA Inventory & Data Subject Privacy Requests (Kenya Data Protection Act 2019 aligned)
 operationsRouter.get(
   '/safeguarding/dpia-inventory',
-  requireRole('SUPER_ADMIN', 'FIELD_OFFICER'),
+  requireRole('SUPER_ADMIN', 'SAFEGUARDING_OFFICER', 'WELFARE_OFFICER', 'DATA_MANAGEMENT_OFFICER', 'AUDITOR', 'FIELD_OFFICER'),
   requirePrivilegedMfa,
   async (_req: AuthRequest, res) => {
     const incidents = await db

@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { eq, desc, sql } from 'drizzle-orm';
+import { eq, desc, sql, inArray } from 'drizzle-orm';
 import { db, pool } from '../db/index.ts';
 import {
   users,
   roles,
   userRoles,
+  userPermissions,
   beneficiaryProfiles,
   verificationCases,
   verificationCaseEvents,
@@ -23,18 +24,45 @@ import {
 import {
   requireAuth,
   requireRole,
+  requireAnyAdminOrPermission,
   requirePrivilegedMfa,
   AuthRequest,
   writeAuditLog,
 } from '../middleware/auth.ts';
-import { decryptSensitiveText, encryptSensitiveText } from '../lib/crypto.ts';
+import { decryptSensitiveText, encryptSensitiveText, hashPassword } from '../lib/crypto.ts';
+import {
+  ADMIN_ACCESS_ROLE_CODES,
+  PERMISSION_ACTION_VERBS,
+  SUB_ADMIN_PERMISSION_FLAGS,
+  SUB_ADMIN_ROLE_CODES,
+  type RoleCode,
+  type SubAdminPermissionFlag,
+} from '../types/domain.ts';
+import {
+  ROLE_PERMISSION_MATRIX,
+  buildPermissionPreview,
+  userCanViewSafeguardingCases,
+} from '../lib/rbacPolicy.ts';
 
 export const adminRouter = Router();
 adminRouter.use(requireAuth);
-adminRouter.use(requireRole('SUPER_ADMIN', 'FIELD_OFFICER'));
+adminRouter.use(requireAnyAdminOrPermission());
 
-adminRouter.get('/overview', async (_req: AuthRequest, res) => {
+function isReadOnlyAuditor(req: AuthRequest): boolean {
+  const rolesList = req.authUser?.roles || [];
+  return (
+    (req.authUser?.activeRole === 'AUDITOR' || rolesList.includes('AUDITOR')) &&
+    !rolesList.includes('SUPER_ADMIN')
+  );
+}
+
+adminRouter.get('/overview', async (req: AuthRequest, res) => {
   try {
+    const canSeeSafeguarding = userCanViewSafeguardingCases(
+      req.authUser!.roles,
+      req.authUser!.permissions
+    );
+
     const [
       cases,
       needs,
@@ -46,6 +74,7 @@ adminRouter.get('/overview', async (_req: AuthRequest, res) => {
       userList,
       roleList,
       assignments,
+      directPermRows,
     ] = await Promise.all([
       db
         .select({
@@ -116,8 +145,10 @@ adminRouter.get('/overview', async (_req: AuthRequest, res) => {
       db.select().from(humanitarianFunds),
       db.select().from(fundAllocations).orderBy(desc(fundAllocations.createdAt)),
       db.select().from(disbursements).orderBy(desc(disbursements.createdAt)),
-      db.select().from(safeguardingIncidents).orderBy(desc(safeguardingIncidents.createdAt)),
-      db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(50),
+      canSeeSafeguarding
+        ? db.select().from(safeguardingIncidents).orderBy(desc(safeguardingIncidents.createdAt))
+        : Promise.resolve([]),
+      db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(80),
       db
         .select({
           id: users.id,
@@ -130,9 +161,10 @@ adminRouter.get('/overview', async (_req: AuthRequest, res) => {
         })
         .from(users)
         .orderBy(desc(users.createdAt))
-        .limit(40),
+        .limit(100),
       db.select().from(roles),
       db.select().from(volunteerAssignments).orderBy(desc(volunteerAssignments.createdAt)),
+      db.select().from(userPermissions),
     ]);
 
     const userRoleLinks = await db
@@ -149,6 +181,33 @@ adminRouter.get('/overview', async (_req: AuthRequest, res) => {
       .orderBy(desc(verificationCaseEvents.createdAt))
       .limit(100);
 
+    const userLookup = new Map(userList.map((u) => [u.id, { fullName: u.fullName, email: u.email }]));
+    const accessAuditActions = new Set([
+      'SUBADMIN_CREATED',
+      'USER_PERMISSIONS_UPDATED',
+      'ADMIN_USER_GOVERNANCE_UPDATED',
+      'ORG_LEADERSHIP_UPDATED',
+      'STAFF_APPOINTMENT_APPROVED',
+      'DISCIPLINARY_RECORD_ACCESSED',
+      'STAFF_PROFILE_UPDATED',
+      'FIELD_OFFICER_APPOINTED',
+    ]);
+
+    const accessAuditLogs = audits
+      .filter((a) => accessAuditActions.has(a.action) || a.action.includes('PERMISSION') || a.action.includes('ROLE'))
+      .map((a) => ({
+        id: a.id,
+        action: a.action,
+        actorRole: a.actorRole,
+        actorName: a.actorUserId ? userLookup.get(a.actorUserId)?.fullName || 'Administrator' : 'System',
+        actorEmail: a.actorUserId ? userLookup.get(a.actorUserId)?.email || '—' : '—',
+        targetUserId: a.entityId,
+        targetUserName: a.entityId ? userLookup.get(a.entityId)?.fullName || a.entityId : '—',
+        targetUserEmail: a.entityId ? userLookup.get(a.entityId)?.email || '—' : '—',
+        detailsJson: a.detailsJson,
+        createdAt: a.createdAt,
+      }));
+
     res.json({
       verificationCases: cases,
       caseEvents,
@@ -156,17 +215,26 @@ adminRouter.get('/overview', async (_req: AuthRequest, res) => {
       funds,
       allocations,
       disbursements: disbList,
+      safeguardingRestricted: !canSeeSafeguarding,
       safeguardingIncidents: incidents.map((inc) => ({
         ...inc,
         summary: decryptSensitiveText(inc.summaryEnc),
       })),
       auditLogs: audits,
+      accessAuditLogs,
       users: userList.map((u) => ({
         ...u,
         roles: userRoleLinks.filter((l) => l.userId === u.id).map((l) => l.roleCode),
+        permissions: directPermRows
+          .filter((p) => p.userId === u.id)
+          .map((p) => p.permissionCode),
       })),
       roles: roleList,
       volunteerAssignments: assignments,
+      subAdminRoleCodes: SUB_ADMIN_ROLE_CODES,
+      subAdminPermissionFlags: SUB_ADMIN_PERMISSION_FLAGS,
+      permissionActionVerbs: PERMISSION_ACTION_VERBS,
+      rolePermissionMatrix: ROLE_PERMISSION_MATRIX,
     });
   } catch (err) {
     console.error('Admin overview error:', err);
@@ -175,162 +243,192 @@ adminRouter.get('/overview', async (_req: AuthRequest, res) => {
 });
 
 // Verification Centre Multi-Officer Decision & Case History
-adminRouter.post('/verification/:caseId/action', requirePrivilegedMfa, async (req: AuthRequest, res) => {
-  try {
-    const schema = z.object({
-      officerWorkspace: z.enum([
-        'VERIFICATION_OFFICER',
-        'SOCIAL_WELFARE_OFFICER',
-        'FIELD_OFFICER',
-        'SAFEGUARDING_OFFICER',
-      ]),
-      actionType: z.enum([
-        'NOTE',
-        'LEVEL_ADVANCE',
-        'FIELD_VISIT',
-        'APPROVE_V4',
-        'REJECT',
-        'SUSPEND',
-        'REASSESSMENT',
-        'APPEAL_RESOLVE',
-        'DUPLICATE_FLAG',
-      ]),
-      verificationLevel: z.enum(['V0', 'V1', 'V2', 'V3', 'V4']).optional(),
-      reason: z.string().min(5).max(1000),
-      identityVerified: z.boolean().optional(),
-      guardianVerified: z.boolean().optional(),
-      householdVerified: z.boolean().optional(),
-      needVerified: z.boolean().optional(),
-      documentChecklistOk: z.boolean().optional(),
-      fieldVisitVerified: z.boolean().optional(),
-      fieldVisitNotes: z.string().optional(),
-      institutionalConfirmationRef: z.string().optional(),
-      safeguardingCleared: z.boolean().optional(),
-      duplicateAlertFlag: z.boolean().optional(),
-      duplicateAlertDetails: z.string().optional(),
-      approvePublicListing: z.boolean().optional(),
-    });
-
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ error: 'Documented reason (min 5 chars) and valid action are required.' });
-    }
-    const d = parsed.data;
-    const caseId = String(req.params.caseId);
-
-    const [existing] = await db
-      .select()
-      .from(verificationCases)
-      .where(eq(verificationCases.id, caseId))
-      .limit(1);
-    if (!existing) return res.status(404).json({ error: 'Verification case not found.' });
-
-    const nextLevel =
-      d.actionType === 'APPROVE_V4' ? 'V4' : d.verificationLevel || existing.verificationLevel;
-
-    let nextStage = existing.stage;
-    if (d.actionType === 'APPROVE_V4') nextStage = 'VERIFIED';
-    if (d.actionType === 'REJECT') nextStage = 'REJECTED';
-    if (d.actionType === 'SUSPEND') nextStage = 'SUSPENDED';
-    if (d.actionType === 'REASSESSMENT') nextStage = 'DOCUMENT_REVIEW';
-    if (d.actionType === 'FIELD_VISIT') nextStage = 'FIELD_VISIT';
-
-    const updatedCase = await db.transaction(async (tx) => {
-      const [vc] = await tx
-        .update(verificationCases)
-        .set({
-          officerWorkspace: d.officerWorkspace,
-          verificationLevel: nextLevel,
-          stage: nextStage,
-          assignedOfficerId: req.authUser!.userId,
-          identityVerified: d.identityVerified ?? existing.identityVerified,
-          guardianVerified: d.guardianVerified ?? existing.guardianVerified,
-          householdVerified: d.householdVerified ?? existing.householdVerified,
-          needVerified: d.needVerified ?? existing.needVerified,
-          documentChecklistOk: d.documentChecklistOk ?? existing.documentChecklistOk,
-          fieldVisitVerified: d.fieldVisitVerified ?? existing.fieldVisitVerified,
-          fieldVisitDate: d.fieldVisitVerified ? new Date() : existing.fieldVisitDate,
-          fieldVisitNotes: d.fieldVisitNotes ?? existing.fieldVisitNotes,
-          institutionalConfirmationRef:
-            d.institutionalConfirmationRef ?? existing.institutionalConfirmationRef,
-          safeguardingCleared:
-            d.actionType === 'APPROVE_V4'
-              ? true
-              : d.safeguardingCleared ?? existing.safeguardingCleared,
-          duplicateAlertFlag: d.duplicateAlertFlag ?? existing.duplicateAlertFlag,
-          duplicateAlertDetails: d.duplicateAlertDetails ?? existing.duplicateAlertDetails,
-          decisionNotes: d.reason,
-          decidedBy: req.authUser!.userId,
-          decidedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(verificationCases.id, caseId))
-        .returning();
-
-      await tx.insert(verificationCaseEvents).values({
-        caseId,
-        actorUserId: req.authUser!.userId,
-        actorWorkspace: d.officerWorkspace,
-        eventType: d.actionType,
-        previousLevel: existing.verificationLevel,
-        newLevel: nextLevel,
-        reason: d.reason,
-      });
-
-      const isVerified = nextStage === 'VERIFIED' && nextLevel === 'V4';
-      await tx
-        .update(beneficiaryProfiles)
-        .set({
-          verificationLevel: nextLevel,
-          verificationStatus:
-            nextStage === 'VERIFIED'
-              ? 'VERIFIED'
-              : nextStage === 'REJECTED'
-                ? 'REJECTED'
-                : nextStage === 'SUSPENDED'
-                  ? 'SUSPENDED'
-                  : 'UNDER_REVIEW',
-          safeguardingCleared: vc.safeguardingCleared,
-          publicListingApproved: isVerified && Boolean(d.approvePublicListing ?? true),
-          updatedAt: new Date(),
-        })
-        .where(eq(beneficiaryProfiles.id, existing.beneficiaryId));
-
-      if (isVerified) {
-        await tx
-          .update(beneficiaryStories)
-          .set({
-            consentVerified: true,
-            isPublished: Boolean(d.approvePublicListing ?? true),
-            approvedBy: req.authUser!.userId,
-            publishedAt: new Date(),
-          })
-          .where(eq(beneficiaryStories.beneficiaryId, existing.beneficiaryId));
+adminRouter.post(
+  '/verification/:caseId/action',
+  requirePrivilegedMfa,
+  async (req: AuthRequest, res) => {
+    try {
+      if (isReadOnlyAuditor(req)) {
+        return res.status(403).json({
+          error: 'Auditor independence enforced: Auditors hold read-only audit access and cannot alter verification decisions.',
+        });
+      }
+      const allowedVerification =
+        req.authUser!.roles.some((r) =>
+          ['SUPER_ADMIN', 'VERIFICATION_OFFICER', 'FIELD_OFFICER', 'WELFARE_OFFICER', 'COUNTY_REPRESENTATIVE', 'SAFEGUARDING_OFFICER'].includes(r)
+        ) || req.authUser!.permissions.includes('canVerifyUsers');
+      if (!allowedVerification) {
+        return res.status(403).json({ error: 'Missing verification officer privileges or canVerifyUsers flag.' });
       }
 
-      return vc;
-    });
+      const schema = z.object({
+        officerWorkspace: z.enum([
+          'VERIFICATION_OFFICER',
+          'SOCIAL_WELFARE_OFFICER',
+          'FIELD_OFFICER',
+          'SAFEGUARDING_OFFICER',
+        ]),
+        actionType: z.enum([
+          'NOTE',
+          'LEVEL_ADVANCE',
+          'FIELD_VISIT',
+          'APPROVE_V4',
+          'REJECT',
+          'SUSPEND',
+          'REASSESSMENT',
+          'APPEAL_RESOLVE',
+          'DUPLICATE_FLAG',
+        ]),
+        verificationLevel: z.enum(['V0', 'V1', 'V2', 'V3', 'V4']).optional(),
+        reason: z.string().min(5).max(1000),
+        identityVerified: z.boolean().optional(),
+        guardianVerified: z.boolean().optional(),
+        householdVerified: z.boolean().optional(),
+        needVerified: z.boolean().optional(),
+        documentChecklistOk: z.boolean().optional(),
+        fieldVisitVerified: z.boolean().optional(),
+        fieldVisitNotes: z.string().optional(),
+        institutionalConfirmationRef: z.string().optional(),
+        safeguardingCleared: z.boolean().optional(),
+        duplicateAlertFlag: z.boolean().optional(),
+        duplicateAlertDetails: z.string().optional(),
+        approvePublicListing: z.boolean().optional(),
+      });
 
-    await writeAuditLog({
-      actorUserId: req.authUser!.userId,
-      actorRole: req.authUser!.activeRole,
-      action: `VERIFICATION_${d.actionType}`,
-      entityType: 'verification_cases',
-      entityId: caseId,
-      ip: req.ip,
-      details: { previousLevel: existing.verificationLevel, newLevel: nextLevel, reason: d.reason },
-    });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Documented reason (min 5 chars) and valid action are required.' });
+      }
+      const d = parsed.data;
+      const caseId = String(req.params.caseId);
 
-    res.json({ verificationCase: updatedCase });
-  } catch (err) {
-    console.error('Verification action error:', err);
-    res.status(500).json({ error: 'Unable to record verification action.' });
+      const [existing] = await db
+        .select()
+        .from(verificationCases)
+        .where(eq(verificationCases.id, caseId))
+        .limit(1);
+      if (!existing) return res.status(404).json({ error: 'Verification case not found.' });
+
+      const nextLevel =
+        d.actionType === 'APPROVE_V4' ? 'V4' : d.verificationLevel || existing.verificationLevel;
+
+      let nextStage = existing.stage;
+      if (d.actionType === 'APPROVE_V4') nextStage = 'VERIFIED';
+      if (d.actionType === 'REJECT') nextStage = 'REJECTED';
+      if (d.actionType === 'SUSPEND') nextStage = 'SUSPENDED';
+      if (d.actionType === 'REASSESSMENT') nextStage = 'DOCUMENT_REVIEW';
+      if (d.actionType === 'FIELD_VISIT') nextStage = 'FIELD_VISIT';
+
+      const updatedCase = await db.transaction(async (tx) => {
+        const [vc] = await tx
+          .update(verificationCases)
+          .set({
+            officerWorkspace: d.officerWorkspace,
+            verificationLevel: nextLevel,
+            stage: nextStage,
+            assignedOfficerId: req.authUser!.userId,
+            identityVerified: d.identityVerified ?? existing.identityVerified,
+            guardianVerified: d.guardianVerified ?? existing.guardianVerified,
+            householdVerified: d.householdVerified ?? existing.householdVerified,
+            needVerified: d.needVerified ?? existing.needVerified,
+            documentChecklistOk: d.documentChecklistOk ?? existing.documentChecklistOk,
+            fieldVisitVerified: d.fieldVisitVerified ?? existing.fieldVisitVerified,
+            fieldVisitDate: d.fieldVisitVerified ? new Date() : existing.fieldVisitDate,
+            fieldVisitNotes: d.fieldVisitNotes ?? existing.fieldVisitNotes,
+            institutionalConfirmationRef:
+              d.institutionalConfirmationRef ?? existing.institutionalConfirmationRef,
+            safeguardingCleared:
+              d.actionType === 'APPROVE_V4'
+                ? true
+                : d.safeguardingCleared ?? existing.safeguardingCleared,
+            duplicateAlertFlag: d.duplicateAlertFlag ?? existing.duplicateAlertFlag,
+            duplicateAlertDetails: d.duplicateAlertDetails ?? existing.duplicateAlertDetails,
+            decisionNotes: d.reason,
+            decidedBy: req.authUser!.userId,
+            decidedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(verificationCases.id, caseId))
+          .returning();
+
+        await tx.insert(verificationCaseEvents).values({
+          caseId,
+          actorUserId: req.authUser!.userId,
+          actorWorkspace: d.officerWorkspace,
+          eventType: d.actionType,
+          previousLevel: existing.verificationLevel,
+          newLevel: nextLevel,
+          reason: d.reason,
+        });
+
+        const isVerified = nextStage === 'VERIFIED' && nextLevel === 'V4';
+        await tx
+          .update(beneficiaryProfiles)
+          .set({
+            verificationLevel: nextLevel,
+            verificationStatus:
+              nextStage === 'VERIFIED'
+                ? 'VERIFIED'
+                : nextStage === 'REJECTED'
+                  ? 'REJECTED'
+                  : nextStage === 'SUSPENDED'
+                    ? 'SUSPENDED'
+                    : 'UNDER_REVIEW',
+            safeguardingCleared: vc.safeguardingCleared,
+            publicListingApproved: isVerified && Boolean(d.approvePublicListing ?? true),
+            updatedAt: new Date(),
+          })
+          .where(eq(beneficiaryProfiles.id, existing.beneficiaryId));
+
+        if (isVerified) {
+          await tx
+            .update(beneficiaryStories)
+            .set({
+              consentVerified: true,
+              isPublished: Boolean(d.approvePublicListing ?? true),
+              approvedBy: req.authUser!.userId,
+              publishedAt: new Date(),
+            })
+            .where(eq(beneficiaryStories.beneficiaryId, existing.beneficiaryId));
+        }
+
+        return vc;
+      });
+
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: `VERIFICATION_${d.actionType}`,
+        entityType: 'verification_cases',
+        entityId: caseId,
+        ip: req.ip,
+        details: { previousLevel: existing.verificationLevel, newLevel: nextLevel, reason: d.reason },
+      });
+
+      res.json({ verificationCase: updatedCase });
+    } catch (err) {
+      console.error('Verification action error:', err);
+      res.status(500).json({ error: 'Unable to record verification action.' });
+    }
   }
-});
+);
 
 // Needs Management Engine: Adjustable 100-point model + Mandatory Human Final Approval
 adminRouter.post('/needs/:needId/assess', requirePrivilegedMfa, async (req: AuthRequest, res) => {
   try {
+    if (isReadOnlyAuditor(req)) {
+      return res.status(403).json({
+        error: 'Auditor independence enforced: Auditors cannot modify need assessments.',
+      });
+    }
+    const allowedNeeds =
+      req.authUser!.roles.some((r) =>
+        ['SUPER_ADMIN', 'VERIFICATION_OFFICER', 'WELFARE_OFFICER', 'FIELD_OFFICER', 'COUNTY_REPRESENTATIVE'].includes(r)
+      ) || req.authUser!.permissions.includes('canVerifyNeed');
+    if (!allowedNeeds) {
+      return res.status(403).json({ error: 'Missing need verification privileges (canVerifyNeed).' });
+    }
+
     const schema = z.object({
       vulnerabilityScore: z.number().int().min(0).max(30),
       urgencyScore: z.number().int().min(0).max(25),
@@ -417,9 +515,29 @@ adminRouter.post('/needs/:needId/assess', requirePrivilegedMfa, async (req: Auth
   }
 });
 
-// Central Fund Allocation & Disbursement (Atomic DB transaction + MFA required)
+// Central Fund Allocation & Disbursement (Atomic DB transaction + MFA + Separation of Duties)
 adminRouter.post('/finance/disburse', requirePrivilegedMfa, async (req: AuthRequest, res) => {
   try {
+    if (isReadOnlyAuditor(req)) {
+      return res.status(403).json({
+        error: 'Auditor independence enforced: Auditors cannot execute financial disbursements.',
+      });
+    }
+    if (req.authUser!.activeRole === 'VERIFICATION_OFFICER') {
+      return res.status(403).json({
+        error: 'Rule #1 Separation of Duties: Verification officers may verify and recommend cases but cannot release funds.',
+      });
+    }
+    const canDisburse =
+      req.authUser!.roles.includes('SUPER_ADMIN') ||
+      req.authUser!.roles.includes('FINANCE_OFFICER') ||
+      req.authUser!.permissions.includes('canDisburseFunds');
+    if (!canDisburse) {
+      return res.status(403).json({
+        error: 'Missing financial disbursement privilege (FINANCE_OFFICER or canDisburseFunds required).',
+      });
+    }
+
     const schema = z.object({
       fundId: z.string().uuid(),
       beneficiaryId: z.string().uuid(),
@@ -503,6 +621,17 @@ adminRouter.post('/finance/disburse', requirePrivilegedMfa, async (req: AuthRequ
 });
 
 adminRouter.post('/safeguarding', requirePrivilegedMfa, async (req: AuthRequest, res) => {
+  if (isReadOnlyAuditor(req)) {
+    return res.status(403).json({
+      error: 'Auditor independence enforced: Auditors cannot alter safeguarding incident statuses.',
+    });
+  }
+  if (!userCanViewSafeguardingCases(req.authUser!.roles, req.authUser!.permissions)) {
+    return res.status(403).json({
+      error: 'Rule #7 Safeguarding Confidentiality: HR and non-safeguarding roles cannot access or modify protected safeguarding investigations.',
+    });
+  }
+
   const { incidentId, status, resolutionNotes, beneficiaryId, category, severity, summary } =
     req.body as {
       incidentId?: string;
@@ -515,6 +644,20 @@ adminRouter.post('/safeguarding', requirePrivilegedMfa, async (req: AuthRequest,
     };
 
   if (incidentId && status) {
+    const [existing] = await db
+      .select()
+      .from(safeguardingIncidents)
+      .where(eq(safeguardingIncidents.id, incidentId))
+      .limit(1);
+    if (!existing) return res.status(404).json({ error: 'Safeguarding incident not found.' });
+
+    // Anti-self-approval: reporting officer cannot unilaterally close/resolve own case
+    if (status === 'RESOLVED' && existing.reportedByUserId === req.authUser!.userId) {
+      return res.status(403).json({
+        error: 'Independent safeguarding oversight enforced: you cannot unilaterally resolve a safeguarding incident you reported.',
+      });
+    }
+
     const [updated] = await db
       .update(safeguardingIncidents)
       .set({
@@ -545,7 +688,7 @@ adminRouter.post('/safeguarding', requirePrivilegedMfa, async (req: AuthRequest,
     .values({
       beneficiaryId: beneficiaryId || null,
       reportedByUserId: req.authUser!.userId,
-      assignedAdminId: req.authUser!.userId,
+      assignedAdminId: null,
       severity: severity || 'HIGH',
       category: category || 'CHILD_PROTECTION',
       summaryEnc: encryptSensitiveText(summary),
@@ -554,6 +697,284 @@ adminRouter.post('/safeguarding', requirePrivilegedMfa, async (req: AuthRequest,
     .returning();
   res.status(201).json({ incident: created });
 });
+
+// Permission Mapping Preview (Before any role or permission change is committed)
+adminRouter.post(
+  '/permissions/preview',
+  requireRole('SUPER_ADMIN'),
+  async (req: AuthRequest, res) => {
+    try {
+      const schema = z.object({
+        targetUserId: z.string().uuid().optional(),
+        newRoleCode: z.string().optional().nullable(),
+        selectedFlags: z.array(z.string()).default([]),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: 'Invalid preview payload.' });
+
+      let existingRoles: RoleCode[] = [];
+      if (parsed.data.targetUserId) {
+        const links = await db
+          .select({ roleCode: roles.code })
+          .from(userRoles)
+          .innerJoin(roles, eq(userRoles.roleId, roles.id))
+          .where(eq(userRoles.userId, parsed.data.targetUserId));
+        existingRoles = links.map((l) => l.roleCode as RoleCode);
+      }
+
+      const validFlags = parsed.data.selectedFlags.filter((f): f is SubAdminPermissionFlag =>
+        SUB_ADMIN_PERMISSION_FLAGS.some((sf) => sf.code === f)
+      );
+
+      const preview = buildPermissionPreview({
+        existingRoles,
+        newRoleCode: (parsed.data.newRoleCode || null) as RoleCode | null,
+        selectedFlags: validFlags,
+      });
+
+      res.json({ preview });
+    } catch (err) {
+      console.error('Permission preview error:', err);
+      res.status(500).json({ error: 'Unable to compute permission preview.' });
+    }
+  }
+);
+
+// Create Sub-Admin Account with Initial Role & Granular Permissions
+adminRouter.post(
+  '/subadmins',
+  requireRole('SUPER_ADMIN'),
+  requirePrivilegedMfa,
+  async (req: AuthRequest, res) => {
+    try {
+      const schema = z.object({
+        fullName: z.string().min(3).max(120),
+        email: z.string().email(),
+        password: z.string().min(10, 'Password must be at least 10 characters.'),
+        phoneE164: z.string().optional(),
+        roleCode: z.enum(SUB_ADMIN_ROLE_CODES as [RoleCode, ...RoleCode[]]),
+        permissionFlags: z.array(z.string()).default([]),
+        additionalAuthorizationReason: z.string().optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid sub-admin details.' });
+      }
+      const d = parsed.data;
+      const emailNorm = d.email.trim().toLowerCase();
+
+      const validFlags = d.permissionFlags.filter((f): f is SubAdminPermissionFlag =>
+        SUB_ADMIN_PERMISSION_FLAGS.some((sf) => sf.code === f)
+      );
+      const preview = buildPermissionPreview({
+        existingRoles: [],
+        newRoleCode: d.roleCode,
+        selectedFlags: validFlags,
+      });
+
+      if (preview.conflicts.length > 0) {
+        return res.status(400).json({ error: preview.conflicts.join(' ') });
+      }
+      if (
+        preview.requiresAdditionalAuthorization &&
+        (!d.additionalAuthorizationReason || d.additionalAuthorizationReason.trim().length < 10)
+      ) {
+        return res.status(400).json({
+          error: 'Critical role or sensitive permission flag requires an additional authorisation justification (min 10 chars).',
+        });
+      }
+
+      const [existingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, emailNorm))
+        .limit(1);
+      if (existingUser) {
+        return res.status(409).json({ error: 'An account with this email already exists. Use Permission Mapping instead.' });
+      }
+
+      const [roleRow] = await db.select().from(roles).where(eq(roles.code, d.roleCode)).limit(1);
+      if (!roleRow) {
+        return res.status(400).json({ error: `Role ${d.roleCode} is not configured.` });
+      }
+
+      const passwordHash = await hashPassword(d.password);
+      const createdUser = await db.transaction(async (tx) => {
+        const [u] = await tx
+          .insert(users)
+          .values({
+            email: emailNorm,
+            fullName: d.fullName.trim(),
+            phoneE164: d.phoneE164?.trim() || null,
+            passwordHash,
+            countryCode: 'KE',
+            approvalStatus: 'ACTIVE',
+            emailVerifiedAt: new Date(),
+          })
+          .returning({
+            id: users.id,
+            email: users.email,
+            fullName: users.fullName,
+            approvalStatus: users.approvalStatus,
+          });
+
+        await tx.insert(userRoles).values({
+          userId: u.id,
+          roleId: roleRow.id,
+          assignedBy: req.authUser!.userId,
+          status: 'ACTIVE',
+        });
+
+        for (const flag of validFlags) {
+          await tx
+            .insert(userPermissions)
+            .values({
+              userId: u.id,
+              permissionCode: flag,
+              grantedBy: req.authUser!.userId,
+            })
+            .onConflictDoNothing();
+        }
+        return u;
+      });
+
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: 'SUBADMIN_CREATED',
+        entityType: 'users',
+        entityId: createdUser.id,
+        ip: req.ip,
+        details: {
+          roleCode: d.roleCode,
+          permissionFlags: validFlags,
+          additionalAuthorizationReason: d.additionalAuthorizationReason || null,
+        },
+      });
+
+      res.status(201).json({ user: createdUser, roleCode: d.roleCode, permissions: validFlags });
+    } catch (err) {
+      console.error('Create sub-admin error:', err);
+      res.status(500).json({ error: 'Unable to create sub-admin account.' });
+    }
+  }
+);
+
+// Update User Role & Granular Permission Mapping (with Permission Preview enforcement)
+adminRouter.put(
+  '/users/:userId/permissions',
+  requireRole('SUPER_ADMIN'),
+  requirePrivilegedMfa,
+  async (req: AuthRequest, res) => {
+    try {
+      const targetUserId = String(req.params.userId);
+      const schema = z.object({
+        assignRoleCode: z.string().optional().nullable(),
+        removeAdminRoles: z.boolean().optional(),
+        permissionFlags: z.array(z.string()).default([]),
+        additionalAuthorizationReason: z.string().optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Invalid permission mapping payload.' });
+      }
+      const d = parsed.data;
+
+      const [targetUser] = await db.select().from(users).where(eq(users.id, targetUserId)).limit(1);
+      if (!targetUser) return res.status(404).json({ error: 'Target user not found.' });
+
+      const currentRoleLinks = await db
+        .select({ roleId: roles.id, roleCode: roles.code })
+        .from(userRoles)
+        .innerJoin(roles, eq(userRoles.roleId, roles.id))
+        .where(eq(userRoles.userId, targetUserId));
+      const existingRoles = currentRoleLinks.map((l) => l.roleCode as RoleCode);
+
+      if (targetUserId === req.authUser!.userId && d.removeAdminRoles) {
+        return res.status(403).json({
+          error: 'Safety guard: you cannot strip your own active Super Admin governance role.',
+        });
+      }
+
+      const validFlags = d.permissionFlags.filter((f): f is SubAdminPermissionFlag =>
+        SUB_ADMIN_PERMISSION_FLAGS.some((sf) => sf.code === f)
+      );
+
+      const preview = buildPermissionPreview({
+        existingRoles,
+        newRoleCode: (d.assignRoleCode || null) as RoleCode | null,
+        selectedFlags: validFlags,
+      });
+
+      if (preview.conflicts.length > 0) {
+        return res.status(400).json({ error: preview.conflicts.join(' ') });
+      }
+      if (
+        preview.requiresAdditionalAuthorization &&
+        (!d.additionalAuthorizationReason || d.additionalAuthorizationReason.trim().length < 10)
+      ) {
+        return res.status(400).json({
+          error: 'Rule #10 Additional Authorisation Required: Critical role or financial/safeguarding/HR permission changes require a documented justification (min 10 chars).',
+        });
+      }
+
+      await db.transaction(async (tx) => {
+        if (d.removeAdminRoles) {
+          const adminRoleIds = currentRoleLinks
+            .filter((l) => ADMIN_ACCESS_ROLE_CODES.includes(l.roleCode as RoleCode) && l.roleCode !== 'SUPER_ADMIN')
+            .map((l) => l.roleId);
+          if (adminRoleIds.length > 0) {
+            await tx.delete(userRoles).where(inArray(userRoles.roleId, adminRoleIds));
+          }
+        }
+
+        if (d.assignRoleCode) {
+          const [rRow] = await tx.select().from(roles).where(eq(roles.code, d.assignRoleCode)).limit(1);
+          if (rRow) {
+            await tx
+              .insert(userRoles)
+              .values({
+                userId: targetUserId,
+                roleId: rRow.id,
+                assignedBy: req.authUser!.userId,
+                status: 'ACTIVE',
+              })
+              .onConflictDoNothing();
+          }
+        }
+
+        await tx.delete(userPermissions).where(eq(userPermissions.userId, targetUserId));
+        for (const flag of validFlags) {
+          await tx.insert(userPermissions).values({
+            userId: targetUserId,
+            permissionCode: flag,
+            grantedBy: req.authUser!.userId,
+          });
+        }
+      });
+
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: 'USER_PERMISSIONS_UPDATED',
+        entityType: 'users',
+        entityId: targetUserId,
+        ip: req.ip,
+        details: {
+          assignRoleCode: d.assignRoleCode || null,
+          permissionFlags: validFlags,
+          isCriticalChange: preview.isCriticalChange,
+          additionalAuthorizationReason: d.additionalAuthorizationReason || null,
+        },
+      });
+
+      res.json({ updated: true, permissions: validFlags, preview });
+    } catch (err) {
+      console.error('Update permissions error:', err);
+      res.status(500).json({ error: 'Unable to update user permissions.' });
+    }
+  }
+);
 
 adminRouter.post(
   '/users/:userId/manage',
@@ -566,6 +987,22 @@ adminRouter.post(
       suspensionReason?: string;
       assignRoleCode?: string;
     };
+
+    if (userId === req.authUser!.userId && approvalStatus === 'SUSPENDED') {
+      return res.status(403).json({ error: 'Safety guard: an administrator cannot suspend their own account.' });
+    }
+
+    if (assignRoleCode && ADMIN_ACCESS_ROLE_CODES.includes(assignRoleCode as RoleCode)) {
+      // Check Rule #10: Critical role assignments require permission mapping endpoint or justification
+      const preview = buildPermissionPreview({
+        existingRoles: [],
+        newRoleCode: assignRoleCode as RoleCode,
+        selectedFlags: [],
+      });
+      if (preview.conflicts.length > 0) {
+        return res.status(400).json({ error: preview.conflicts.join(' ') });
+      }
+    }
 
     if (approvalStatus) {
       await db
@@ -654,7 +1091,6 @@ adminRouter.get(
       `);
       const allTables = tablesRes.rows.map((r) => r.table_name);
 
-      // Foreign key dependencies for topological ordering (parents before children)
       const fkRes = await pool.query<{ child_table: string; parent_table: string }>(`
         SELECT
           cl.relname AS child_table,
@@ -696,7 +1132,7 @@ adminRouter.get(
         '',
         'BEGIN;',
         'SET statement_timeout = 0;',
-        'SET client_encoding = \'UTF8\';',
+        "SET client_encoding = 'UTF8';",
         'SET standard_conforming_strings = on;',
         'CREATE EXTENSION IF NOT EXISTS "pgcrypto";',
         '',

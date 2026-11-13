@@ -20,9 +20,10 @@ import { BeneficiaryPortal } from './components/portals/BeneficiaryPortal';
 import { SupporterPortal } from './components/portals/SupporterPortal';
 import { CorporatePortal } from './components/portals/CorporatePortal';
 import { AdminVerificationPortal } from './components/portals/AdminVerificationPortal';
-import { ROLE_DEFINITIONS, type RoleCode } from './types/domain';
+import { StaffManagementCentre } from './components/staff/StaffManagementCentre';
+import { ADMIN_ACCESS_ROLE_CODES, ROLE_DEFINITIONS, type RoleCode } from './types/domain';
 
-type AppRoute = 'public' | 'auth' | 'portal' | 'security';
+type AppRoute = 'public' | 'staff' | 'auth' | 'portal' | 'security';
 
 const HumanityConnectShell: React.FC = () => {
   const { user, loading, switchRole, loginWithPassword, signInWithGoogle, logout } = useAuth();
@@ -53,6 +54,9 @@ const HumanityConnectShell: React.FC = () => {
 
   const renderActivePortal = () => {
     if (!user) return null;
+    if (ADMIN_ACCESS_ROLE_CODES.includes(user.activeRole)) {
+      return <AdminVerificationPortal />;
+    }
     switch (user.activeRole) {
       case 'ORPHAN_GUARDIAN':
       case 'DESTITUTE':
@@ -60,9 +64,6 @@ const HumanityConnectShell: React.FC = () => {
         return <BeneficiaryPortal />;
       case 'WELL_WISHER':
         return <CorporatePortal />;
-      case 'SUPER_ADMIN':
-      case 'FIELD_OFFICER':
-        return <AdminVerificationPortal />;
       case 'SUPPORTIVE':
       default:
         return <SupporterPortal initialCheckoutTarget={pendingCheckout} />;
@@ -106,6 +107,15 @@ const HumanityConnectShell: React.FC = () => {
               }`}
             >
               Public Cases & Funds
+            </button>
+            <button
+              type="button"
+              onClick={() => setRoute('staff')}
+              className={`whitespace-nowrap transition-colors hover:text-[#287A59] ${
+                route === 'staff' ? 'text-[#287A59]' : ''
+              }`}
+            >
+              Staff & Careers
             </button>
             {user && (
               <button
@@ -209,6 +219,16 @@ const HumanityConnectShell: React.FC = () => {
             >
               Public Cases & Funds
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRoute('staff');
+                setMobileMenuOpen(false);
+              }}
+              className="w-full text-left px-3 py-2.5 rounded-xl text-sm font-semibold hover:bg-[#EAE6DC]/60"
+            >
+              Staff & Careers (170 Positions)
+            </button>
             {user && (
               <>
                 <button
@@ -307,6 +327,8 @@ const HumanityConnectShell: React.FC = () => {
           </div>
         ) : route === 'portal' && user ? (
           renderActivePortal()
+        ) : route === 'staff' ? (
+          <StaffManagementCentre mode="public" onNavigateAuth={openAuth} />
         ) : (
           <PublicLandingPage
             onNavigateAuth={openAuth}

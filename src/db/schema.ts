@@ -942,6 +942,448 @@ export const sponsorshipMatchSuggestions = pgTable(
   ]
 );
 
+// 39. Granular User Permission Flags (Sub-Admin Action Flags)
+export const userPermissions = pgTable(
+  'user_permissions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    permissionCode: text('permission_code').notNull(),
+    grantedBy: uuid('granted_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('uq_user_permission_flag').on(t.userId, t.permissionCode),
+    index('idx_user_permissions_user').on(t.userId),
+  ]
+);
+
+// 40. National & International Staff Management Centre (170 Approved Establishment Positions)
+export const staffPositions = pgTable(
+  'staff_positions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    jobId: text('job_id').notNull().unique(),
+    departmentNumber: integer('department_number').notNull(),
+    department: text('department').notNull(),
+    jobTitle: text('job_title').notNull(),
+    hierarchyLevel: text('hierarchy_level').notNull().default('FIELD_OFFICER'),
+    reportsToJobId: text('reports_to_job_id'),
+    independentOversight: boolean('independent_oversight').notNull().default(false),
+    jobDescription: text('job_description').notNull(),
+    mainResponsibilities: jsonb('main_responsibilities').$type<string[]>().notNull(),
+    dailyResponsibilities: jsonb('daily_responsibilities').$type<string[]>().notNull(),
+    weeklyResponsibilities: jsonb('weekly_responsibilities').$type<string[]>().notNull(),
+    monthlyResponsibilities: jsonb('monthly_responsibilities').$type<string[]>().notNull(),
+    requiredQualifications: text('required_qualifications').notNull(),
+    professionalQualifications: text('professional_qualifications').notNull(),
+    requiredExperience: text('required_experience').notNull(),
+    professionalSkills: jsonb('professional_skills').$type<string[]>().notNull(),
+    communicationSkills: jsonb('communication_skills').$type<string[]>().notNull(),
+    ethicalRequirements: text('ethical_requirements').notNull(),
+    safeguardingResponsibilities: text('safeguarding_responsibilities').notNull(),
+    reportingOfficer: text('reporting_officer').notNull(),
+    supervisoryResponsibilities: text('supervisory_responsibilities').notNull(),
+    geographicalJurisdiction: text('geographical_jurisdiction').notNull(),
+    employmentStatus: text('employment_status').notNull(),
+    workingConditions: text('working_conditions').notNull(),
+    professionalDevelopment: text('professional_development').notNull(),
+    performanceExpectations: text('performance_expectations').notNull(),
+    incumbentName: text('incumbent_name'),
+    incumbentUserId: uuid('incumbent_user_id').references(() => users.id, { onDelete: 'set null' }),
+    actingOfficerName: text('acting_officer_name'),
+    actingOfficerUserId: uuid('acting_officer_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    vacancyStatus: text('vacancy_status').notNull().default('VACANT'), // FILLED | VACANT | ACTING | RECRUITING
+    isVacancyPublished: boolean('is_vacancy_published').notNull().default(false),
+    vacancyPublishedAt: timestamp('vacancy_published_at', { withTimezone: true }),
+    revisionStatus: text('revision_status').notNull().default('APPROVED'), // APPROVED | PENDING_APPROVAL
+    revisionVersion: integer('revision_version').notNull().default(1),
+    lastRevisedBy: uuid('last_revised_by').references(() => users.id, { onDelete: 'set null' }),
+    lastApprovedBy: uuid('last_approved_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('idx_staff_positions_dept').on(t.departmentNumber, t.jobTitle),
+    index('idx_staff_positions_reports').on(t.reportsToJobId),
+  ]
+);
+
+// 41. Staff Job Description Revision Workflow (HR Edit & Two-Person Approval)
+export const staffPositionRevisions = pgTable(
+  'staff_position_revisions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    positionId: uuid('position_id')
+      .notNull()
+      .references(() => staffPositions.id, { onDelete: 'cascade' }),
+    jobId: text('job_id').notNull(),
+    proposedChangesJson: jsonb('proposed_changes_json')
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    revisionNote: text('revision_note').notNull(),
+    status: text('status').notNull().default('PENDING_APPROVAL'), // PENDING_APPROVAL | APPROVED | REJECTED
+    proposedBy: uuid('proposed_by')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    reviewedBy: uuid('reviewed_by').references(() => users.id, { onDelete: 'set null' }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_staff_revisions_pos').on(t.positionId, t.status)]
+);
+
+// 42. Recruitment Vacancies (Staff Vacancies for Approved Positions)
+export const staffVacancies = pgTable(
+  'staff_vacancies',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    vacancyCode: text('vacancy_code').notNull().unique(),
+    positionId: uuid('position_id')
+      .notNull()
+      .references(() => staffPositions.id, { onDelete: 'cascade' }),
+    jobId: text('job_id').notNull(),
+    jobTitle: text('job_title').notNull(),
+    departmentNumber: integer('department_number').notNull(),
+    department: text('department').notNull(),
+    jobLocation: text('job_location').notNull(),
+    employmentType: text('employment_type').notNull().default('FULL_TIME'), // FULL_TIME | CONTRACT | PART_TIME | VOLUNTEER | SECONDMENT
+    jobDescription: text('job_description').notNull(),
+    academicQualifications: text('academic_qualifications').notNull(),
+    professionalRequirements: text('professional_requirements').notNull(),
+    experienceRequirements: text('experience_requirements').notNull(),
+    applicationDeadline: timestamp('application_deadline', { withTimezone: true }).notNull(),
+    requiredDocuments: jsonb('required_documents').$type<string[]>().notNull(),
+    applicationInstructions: text('application_instructions').notNull(),
+    stage: text('stage').notNull().default('VACANCY_DRAFT'), // VACANCY_DRAFT | VACANCY_APPROVED | PUBLISHED | CLOSED
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedBy: uuid('approved_by').references(() => users.id, { onDelete: 'set null' }),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_staff_vacancies_stage').on(t.stage, t.departmentNumber)]
+);
+
+// 43. Recruitment Applications (15-Stage Pipeline + Encrypted Applicant PII + Outcomes)
+export const recruitmentApplications = pgTable(
+  'recruitment_applications',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    applicationRef: text('application_ref').notNull().unique(),
+    vacancyId: uuid('vacancy_id')
+      .notNull()
+      .references(() => staffVacancies.id, { onDelete: 'cascade' }),
+    jobId: text('job_id').notNull(),
+    applicantUserId: uuid('applicant_user_id').references(() => users.id, { onDelete: 'set null' }),
+    applicantNameEnc: text('applicant_name_enc').notNull(),
+    applicantEmailEnc: text('applicant_email_enc').notNull(),
+    applicantPhoneEnc: text('applicant_phone_enc').notNull(),
+    nationalIdEnc: text('national_id_enc'),
+    county: text('county').notNull().default('Nairobi'),
+    academicSummary: text('academic_summary').notNull(),
+    professionalCertsSummary: text('professional_certs_summary').notNull(),
+    experienceYears: integer('experience_years').notNull().default(0),
+    coverNote: text('cover_note').notNull(),
+    documentsJson: jsonb('documents_json')
+      .$type<Array<{ name: string; docType: string; verified: boolean; reviewNotes?: string }>>()
+      .notNull()
+      .default([]),
+    stage: text('stage').notNull().default('APPLICATIONS_RECEIVED'),
+    // APPLICATIONS_RECEIVED | INITIAL_SCREENING | SHORTLISTED | INTERVIEW | REFERENCE_CHECKS |
+    // BACKGROUND_SUITABILITY | SELECTION | OFFER_ISSUED | OFFER_ACCEPTED | APPOINTMENT_APPROVED |
+    // ONBOARDING | ACTIVE_EMPLOYEE | UNSUCCESSFUL | WITHDRAWN | REJECTED
+    interviewScheduledAt: timestamp('interview_scheduled_at', { withTimezone: true }),
+    interviewLocationOrLink: text('interview_location_or_link'),
+    interviewScore: integer('interview_score'),
+    interviewAssessmentNotes: text('interview_assessment_notes'),
+    referenceCheckStatus: text('reference_check_status').notNull().default('PENDING'), // PENDING | VERIFIED | FLAGGED
+    referenceCheckNotes: text('reference_check_notes'),
+    backgroundCheckStatus: text('background_check_status').notNull().default('PENDING'), // PENDING | CLEARED | FLAGGED
+    backgroundCheckNotes: text('background_check_notes'),
+    offerTermsSummary: text('offer_terms_summary'),
+    offerIssuedAt: timestamp('offer_issued_at', { withTimezone: true }),
+    offerAcceptedAt: timestamp('offer_accepted_at', { withTimezone: true }),
+    proposedAppointmentBy: uuid('proposed_appointment_by').references(() => users.id, { onDelete: 'set null' }),
+    appointmentApprovedBy: uuid('appointment_approved_by').references(() => users.id, { onDelete: 'set null' }),
+    appointmentApprovedAt: timestamp('appointment_approved_at', { withTimezone: true }),
+    stageNotes: text('stage_notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_recruit_apps_vacancy_stage').on(t.vacancyId, t.stage)]
+);
+
+// 44. Staff Employee Profiles (Employee Management Centre)
+export const staffEmployeeProfiles = pgTable(
+  'staff_employee_profiles',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    staffNumber: text('staff_number').notNull().unique(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    positionId: uuid('position_id').references(() => staffPositions.id, { onDelete: 'set null' }),
+    jobId: text('job_id').notNull(),
+    fullLegalName: text('full_legal_name').notNull(),
+    officialPhotoUrl: text('official_photo_url'),
+    contactEmail: text('contact_email').notNull(),
+    contactPhone: text('contact_phone').notNull(),
+    departmentNumber: integer('department_number').notNull(),
+    department: text('department').notNull(),
+    jobTitle: text('job_title').notNull(),
+    countyAssignment: text('county_assignment').notNull().default('Nairobi'),
+    subCountyAssignment: text('sub_county_assignment'),
+    wardAssignment: text('ward_assignment'),
+    countryCode: text('country_code').notNull().default('KE'),
+    internationalRegion: text('international_region'),
+    employmentCategory: text('employment_category').notNull().default('PERMANENT'), // PERMANENT | FIXED_TERM | CONTRACT | CONSULTANT | VOLUNTEER | FELLOW
+    genderMarker: text('gender_marker'), // Lawfully collected EE marker: FEMALE | MALE | NON_BINARY | PREFER_NOT_TO_SAY
+    appointmentDate: text('appointment_date').notNull(),
+    employmentStatus: text('employment_status').notNull().default('ACTIVE'),
+    // APPLICANT | PENDING_APPOINTMENT | ACTIVE | ON_LEAVE | SUSPENDED | TRANSFERRED | RESIGNED | RETIRED | TERMINATED
+    academicQualifications: text('academic_qualifications').notNull(),
+    professionalCertifications: text('professional_certifications').notNull(),
+    workExperienceSummary: text('work_experience_summary').notNull(),
+    supervisorStaffId: text('supervisor_staff_id'),
+    supervisorName: text('supervisor_name').notNull(),
+    assignedResponsibilities: jsonb('assigned_responsibilities').$type<string[]>().notNull().default([]),
+    emergencyContactName: text('emergency_contact_name').notNull(),
+    emergencyContactPhone: text('emergency_contact_phone').notNull(),
+    emergencyContactRelation: text('emergency_contact_relation').notNull(),
+    trainingHistory: jsonb('training_history')
+      .$type<Array<{ date: string; course: string; provider: string; status: string }>>()
+      .notNull()
+      .default([]),
+    promotionHistory: jsonb('promotion_history')
+      .$type<Array<{ date: string; fromTitle: string; toTitle: string; approvedBy: string }>>()
+      .notNull()
+      .default([]),
+    performanceHistory: jsonb('performance_history')
+      .$type<Array<{ period: string; rating: string; reviewer: string; notes: string }>>()
+      .notNull()
+      .default([]),
+    leaveRecords: jsonb('leave_records')
+      .$type<Array<{ id: string; leaveType: string; startDate: string; endDate: string; status: string }>>()
+      .notNull()
+      .default([]),
+    appointmentDocuments: jsonb('appointment_documents')
+      .$type<Array<{ title: string; issuedAt: string; refNo: string }>>()
+      .notNull()
+      .default([]),
+    exitOrTransferReason: text('exit_or_transfer_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('idx_staff_emp_dept_status').on(t.departmentNumber, t.employmentStatus),
+    index('idx_staff_emp_county').on(t.countryCode, t.countyAssignment),
+  ]
+);
+
+// 45. Restricted Disciplinary Records (Encrypted, Strict Access Control)
+export const staffDisciplinaryRecords = pgTable(
+  'staff_disciplinary_records',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    staffProfileId: uuid('staff_profile_id')
+      .notNull()
+      .references(() => staffEmployeeProfiles.id, { onDelete: 'cascade' }),
+    incidentRef: text('incident_ref').notNull().unique(),
+    category: text('category').notNull(), // CONDUCT | POLICY_BREACH | ATTENDANCE | SAFEGUARDING_REFERRAL
+    severity: text('severity').notNull().default('MODERATE'), // MINOR | MODERATE | SERIOUS | GROSS
+    summaryEnc: text('summary_enc').notNull(),
+    actionTaken: text('action_taken').notNull(),
+    status: text('status').notNull().default('OPEN'), // OPEN | UNDER_INVESTIGATION | RESOLVED
+    loggedByUserId: uuid('logged_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    reviewedByUserId: uuid('reviewed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  },
+  (t) => [index('idx_staff_disc_profile').on(t.staffProfileId, t.status)]
+);
+
+// 46. National, County (47), Sub-County, Ward, Community & International Field Personnel
+export const fieldGeographyOfficers = pgTable(
+  'field_geography_officers',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    officialIdNumber: text('official_id_number').notNull().unique(),
+    staffProfileId: uuid('staff_profile_id').references(() => staffEmployeeProfiles.id, {
+      onDelete: 'set null',
+    }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    fullName: text('full_name').notNull(),
+    fieldRole: text('field_role').notNull(),
+    // COUNTY_COORDINATOR | DEPUTY_COUNTY_COORDINATOR | SUB_COUNTY_COORDINATOR | WARD_FIELD_OFFICER |
+    // COMMUNITY_OUTREACH_OFFICER | COMMUNITY_AMBASSADOR | VOLUNTEER_COORDINATOR | FIELD_ASSESSMENT_OFFICER
+    adminLevel: text('admin_level').notNull(), // NATIONAL | COUNTY | SUB_COUNTY | WARD | COMMUNITY | INTERNATIONAL
+    countryCode: text('country_code').notNull().default('KE'),
+    county: text('county').notNull(),
+    subCounty: text('sub_county'),
+    ward: text('ward'),
+    communityUnit: text('community_unit'),
+    supervisorName: text('supervisor_name').notNull(),
+    supervisorUserId: uuid('supervisor_user_id').references(() => users.id, { onDelete: 'set null' }),
+    assignedDuties: jsonb('assigned_duties').$type<string[]>().notNull().default([]),
+    beneficiaryFollowUpCount: integer('beneficiary_follow_up_count').notNull().default(0),
+    activitiesJson: jsonb('activities_json')
+      .$type<Array<{ date: string; title: string; location: string; outcome: string }>>()
+      .notNull()
+      .default([]),
+    fieldReportsJson: jsonb('field_reports_json')
+      .$type<Array<{ date: string; ref: string; summary: string; verifiedCases: number }>>()
+      .notNull()
+      .default([]),
+    performanceAssessment: text('performance_assessment')
+      .notNull()
+      .default('Meets National Field Operations Standards'),
+    additionalAuthorizedAreas: jsonb('additional_authorized_areas').$type<string[]>().notNull().default([]),
+    status: text('status').notNull().default('ACTIVE'), // ACTIVE | ON_LEAVE | TRANSFERRED | ACTING
+    appointedByUserId: uuid('appointed_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('idx_field_geo_county').on(t.countryCode, t.county, t.adminLevel),
+    index('idx_field_geo_user').on(t.userId),
+  ]
+);
+
+// 47. Individual Departmental Workspace Records (15 Departments)
+export const departmentalWorkspaceItems = pgTable(
+  'departmental_workspace_items',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    departmentNumber: integer('department_number').notNull(),
+    department: text('department').notNull(),
+    itemType: text('item_type').notNull(),
+    // DAILY_ACTIVITY | ASSIGNMENT | PERFORMANCE_REPORT | DOCUMENT | COMMUNICATION |
+    // MEETING | TARGET | MONTHLY_REPORT | NATIONAL_ISSUE
+    title: text('title').notNull(),
+    summary: text('summary').notNull(),
+    status: text('status').notNull().default('PENDING'), // PENDING | IN_PROGRESS | COMPLETED | ESCALATED | ACTIVE
+    assignedToName: text('assigned_to_name').notNull(),
+    assignedToUserId: uuid('assigned_to_user_id').references(() => users.id, { onDelete: 'set null' }),
+    dueDate: text('due_date'),
+    metricValue: text('metric_value'),
+    metricTarget: text('metric_target'),
+    priority: text('priority').notNull().default('NORMAL'), // NORMAL | HIGH | CRITICAL
+    metadataJson: jsonb('metadata_json').$type<Record<string, unknown>>().notNull().default({}),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_dept_ws_dept_type').on(t.departmentNumber, t.itemType, t.status)]
+);
+
+// 48. Staff Performance & Accountability Centre (Daily/Weekly/Monthly/Quarterly/Annual + Self/Supervisor/DeptHead/HR + Challenge)
+export const staffPerformanceReviews = pgTable(
+  'staff_performance_reviews',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    reviewRef: text('review_ref').notNull().unique(),
+    staffProfileId: uuid('staff_profile_id')
+      .notNull()
+      .references(() => staffEmployeeProfiles.id, { onDelete: 'cascade' }),
+    staffNumber: text('staff_number').notNull(),
+    staffName: text('staff_name').notNull(),
+    departmentNumber: integer('department_number').notNull(),
+    department: text('department').notNull(),
+    cadence: text('cadence').notNull().default('MONTHLY'), // DAILY | WEEKLY | MONTHLY | QUARTERLY | ANNUAL
+    reviewPeriod: text('review_period').notNull(),
+    objectivesSummary: text('objectives_summary').notNull(),
+    departmentalTargetRef: text('departmental_target_ref').notNull(),
+    assignedTasksCount: integer('assigned_tasks_count').notNull().default(0),
+    completedActivitiesCount: integer('completed_activities_count').notNull().default(0),
+    metricsJson: jsonb('metrics_json')
+      .$type<{
+        timelinessScore: number;
+        qualityOfWorkScore: number;
+        beneficiaryServiceScore: number;
+        professionalConductScore: number;
+        teamworkScore: number;
+        reportingAccuracyScore: number;
+        trainingParticipationScore: number;
+        safeguardingComplianceOk: boolean;
+      }>()
+      .notNull(),
+    selfAssessmentText: text('self_assessment_text'),
+    supervisorAssessmentText: text('supervisor_assessment_text'),
+    departmentHeadReviewText: text('department_head_review_text'),
+    hrReviewText: text('hr_review_text'),
+    improvementPlan: text('improvement_plan'),
+    recognitionCommendation: text('recognition_commendation'),
+    trainingRecommendation: text('training_recommendation'),
+    overallRating: text('overall_rating').notNull().default('MEETS_EXPECTATIONS'), // EXCEEDS | MEETS_EXPECTATIONS | NEEDS_IMPROVEMENT | PIP_ACTIVE
+    reviewStage: text('review_stage').notNull().default('SELF_ASSESSMENT'), // SELF_ASSESSMENT | SUPERVISOR_REVIEW | DEPT_HEAD_REVIEW | HR_REVIEW | FINALISED
+    staffResponseText: text('staff_response_text'),
+    challengeStatus: text('challenge_status').notNull().default('NONE'), // NONE | CHALLENGED | RESOLVED
+    challengeReason: text('challenge_reason'),
+    reviewerUserId: uuid('reviewer_user_id').references(() => users.id, { onDelete: 'set null' }),
+    deptHeadUserId: uuid('dept_head_user_id').references(() => users.id, { onDelete: 'set null' }),
+    hrReviewerUserId: uuid('hr_reviewer_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_staff_perf_dept_cadence').on(t.departmentNumber, t.cadence, t.reviewStage)]
+);
+
+// 49. Internal Staff Tasks (Task Management Centre with 8 Required Statuses)
+export const internalStaffTasks = pgTable(
+  'internal_staff_tasks',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    taskReference: text('task_reference').notNull().unique(),
+    targetScope: text('target_scope').notNull().default('INDIVIDUAL'), // INDIVIDUAL | TEAM | DEPARTMENT
+    responsibleOfficerName: text('responsible_officer_name').notNull(),
+    responsibleOfficerUserId: uuid('responsible_officer_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    departmentNumber: integer('department_number').notNull(),
+    department: text('department').notNull(),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    priority: text('priority').notNull().default('HIGH'), // LOW | NORMAL | HIGH | URGENT
+    deadline: text('deadline').notNull(),
+    supportingDocuments: jsonb('supporting_documents').$type<string[]>().notNull().default([]),
+    status: text('status').notNull().default('PENDING'),
+    // PENDING | ACCEPTED | IN_PROGRESS | AWAITING_REVIEW | COMPLETED | REJECTED | OVERDUE | CANCELLED
+    supervisorName: text('supervisor_name').notNull(),
+    supervisorUserId: uuid('supervisor_user_id').references(() => users.id, { onDelete: 'set null' }),
+    completionEvidence: text('completion_evidence'),
+    reviewComments: text('review_comments'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_internal_tasks_dept_status').on(t.departmentNumber, t.status)]
+);
+
+// 50. Internal Staff Communication Centre (Announcements, Messages, Meetings, Minutes, Instructions, Escalations)
+export const internalStaffMessages = pgTable(
+  'internal_staff_messages',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    messageRef: text('message_ref').notNull().unique(),
+    channelType: text('channel_type').notNull().default('ANNOUNCEMENT'),
+    // ANNOUNCEMENT | DEPARTMENT_MESSAGE | MEETING_SCHEDULE | MEETING_MINUTES | OPERATIONAL_INSTRUCTION | ESCALATION_REQUEST | DOCUMENT_SHARE
+    departmentNumber: integer('department_number'),
+    department: text('department'),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    meetingDateTime: text('meeting_date_time'),
+    meetingLocationOrLink: text('meeting_location_or_link'),
+    attachmentDocTitle: text('attachment_doc_title'),
+    senderName: text('sender_name').notNull(),
+    senderUserId: uuid('sender_user_id').references(() => users.id, { onDelete: 'set null' }),
+    confidentialityScreened: boolean('confidentiality_screened').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_internal_msgs_type_dept').on(t.channelType, t.departmentNumber)]
+);
+
 // Drizzle Relations
 export const usersRelations = relations(users, ({ many, one }) => ({
   userRoles: many(userRoles),

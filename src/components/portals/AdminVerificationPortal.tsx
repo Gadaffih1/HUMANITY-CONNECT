@@ -15,11 +15,14 @@ import {
   RefreshCw,
   Download,
   Database,
+  UserPlus,
+  KeyRound,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
   GlossyButton,
   ExportReportBar,
+  ModalDialog,
   formatMoney,
   priorityLabel,
   verificationLabel,
@@ -32,6 +35,13 @@ import {
   type OfflineFieldRecord,
 } from '../../lib/offlineVault';
 import { AdminMatchingGovernancePanel } from '../matching/AdminMatchingGovernancePanel';
+import { StaffManagementCentre } from '../staff/StaffManagementCentre';
+import {
+  ROLE_DEFINITIONS,
+  SUB_ADMIN_PERMISSION_FLAGS,
+  SUB_ADMIN_ROLE_CODES,
+  type RoleCode,
+} from '../../types/domain';
 
 type AdminTab =
   | 'verification'
@@ -41,6 +51,7 @@ type AdminTab =
   | 'safeguarding'
   | 'empowerment'
   | 'field-ops'
+  | 'staff-centre'
   | 'governance';
 
 export const AdminVerificationPortal: React.FC = () => {
@@ -111,6 +122,23 @@ export const AdminVerificationPortal: React.FC = () => {
   const [fieldCounty, setFieldCounty] = useState('Nakuru');
   const [fieldSummary, setFieldSummary] = useState('');
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+
+  // Sub-Admin Creation & Granular RBAC Permission Mapping Modal State
+  const [userFilter, setUserFilter] = useState<'ALL' | 'SUB_ADMINS' | 'NON_ADMIN'>('ALL');
+  const [createSubAdminOpen, setCreateSubAdminOpen] = useState(false);
+  const [saFullName, setSaFullName] = useState('');
+  const [saEmail, setSaEmail] = useState('');
+  const [saPassword, setSaPassword] = useState('');
+  const [saRoleCode, setSaRoleCode] = useState<RoleCode>('VERIFICATION_OFFICER');
+  const [saFlags, setSaFlags] = useState<string[]>(['canVerifyUsers', 'canVerifyNeed']);
+  const [saReason, setSaReason] = useState('');
+
+  const [permModalUser, setPermModalUser] = useState<any | null>(null);
+  const [permTargetRole, setPermTargetRole] = useState<RoleCode>('VERIFICATION_OFFICER');
+  const [permFlags, setPermFlags] = useState<string[]>([]);
+  const [permPreview, setPermPreview] = useState<any>(null);
+  const [permAuthReason, setPermAuthReason] = useState('');
+  const [permBusy, setPermBusy] = useState(false);
 
   const loadOffline = async () => {
     const items = await listEncryptedOfflineRecords();
@@ -279,6 +307,7 @@ export const AdminVerificationPortal: React.FC = () => {
           { id: 'safeguarding', label: 'Safeguarding & DPIA' },
           { id: 'empowerment', label: 'Empowerment & Projects' },
           { id: 'field-ops', label: 'Field Ops (Offline Vault)' },
+          { id: 'staff-centre', label: 'Staff, Org & HR Centre' },
           { id: 'governance', label: 'RBAC, Templates & Audits' },
         ].map((item) => (
           <button
@@ -971,6 +1000,19 @@ export const AdminVerificationPortal: React.FC = () => {
       {/* 4. Safeguarding & DPIA */}
       {tab === 'safeguarding' && (
         <div className="space-y-6">
+          {adminData?.safeguardingRestricted && (
+            <div className="hc-card p-6 border-[#9F2D20]/40 bg-[#9F2D20]/5 space-y-2">
+              <div className="flex items-center gap-2 font-bold text-sm text-[#9F2D20]">
+                <Lock className="w-4 h-4" />
+                Confidential Safeguarding Cases Restricted (Separation-of-Duties Active)
+              </div>
+              <p className="text-xs text-[#4A636A]">
+                Unrelated HR and non-safeguarding roles cannot view encrypted beneficiary safeguarding investigations or
+                child protection incidents. Authorised Safeguarding Officers and Super Admin hold exclusive case-file
+                access.
+              </p>
+            </div>
+          )}
           <div className="hc-card p-6 space-y-4">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-5 h-5 text-[#9F2D20]" />
@@ -1330,7 +1372,10 @@ export const AdminVerificationPortal: React.FC = () => {
       {/* 2b. Dynamic Sponsorship Matching Engine Governance */}
       {tab === 'matching' && <AdminMatchingGovernancePanel />}
 
-      {/* 7. RBAC, Communication Templates & Audit Logs */}
+      {/* 6b. Integrated Staff, Organisational, Recruitment, 47-County & HR Reporting Centre */}
+      {tab === 'staff-centre' && <StaffManagementCentre mode="admin" />}
+
+      {/* 7. RBAC, Sub-Admin Permissions Preview, Communication Templates & Audit Logs */}
       {tab === 'governance' && (
         <div className="space-y-6">
           {user?.roles.includes('SUPER_ADMIN') && (
@@ -1343,78 +1388,299 @@ export const AdminVerificationPortal: React.FC = () => {
                   </h3>
                 </div>
                 <p className="text-xs text-[#4A636A]">
-                  Exports the full 35-table PostgreSQL DDL schema, foreign keys, indexes, and live data
+                  Exports the full 50-table PostgreSQL DDL schema, foreign keys, indexes, and live data
                   into a downloadable <code>.sql</code> file for localhost restore via{' '}
                   <code>psql -d humanity_connect -f humanity-connect-postgres-*.sql</code>.
                 </p>
               </div>
-              <GlossyButton variant="gold" disabled={exportingDump} onClick={downloadPgDump}>
-                <Download className="w-4 h-4" />
-                {exportingDump ? 'Generating Dump...' : 'Download .sql Dump'}
-              </GlossyButton>
+              <div className="flex flex-wrap gap-2">
+                <GlossyButton variant="teal" onClick={() => setCreateSubAdminOpen((v) => !v)}>
+                  <UserPlus className="w-4 h-4" />
+                  {createSubAdminOpen ? 'Hide Sub-Admin Form' : 'Create Sub-Admin'}
+                </GlossyButton>
+                <GlossyButton variant="gold" disabled={exportingDump} onClick={downloadPgDump}>
+                  <Download className="w-4 h-4" />
+                  {exportingDump ? 'Generating Dump...' : 'Download .sql Dump'}
+                </GlossyButton>
+              </div>
             </div>
           )}
 
+          {/* Create Sub-Admin Account Card (Super Admin Only) */}
+          {user?.roles.includes('SUPER_ADMIN') && createSubAdminOpen && (
+            <form
+              className="hc-card p-6 space-y-4 text-xs"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setPermBusy(true);
+                setErrorMsg(null);
+                try {
+                  await apiFetch('/api/admin/subadmins', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      fullName: saFullName,
+                      email: saEmail,
+                      password: saPassword,
+                      roleCode: saRoleCode,
+                      permissionFlags: saFlags,
+                      additionalAuthorizationReason: saReason || undefined,
+                    }),
+                  });
+                  setSaFullName('');
+                  setSaEmail('');
+                  setSaPassword('');
+                  setSaReason('');
+                  setCreateSubAdminOpen(false);
+                  await loadAll();
+                  setFeedback(`Sub-Admin account created with ${saRoleCode} and least-privilege flags.`);
+                } catch (err: any) {
+                  setErrorMsg(err.message);
+                } finally {
+                  setPermBusy(false);
+                }
+              }}
+            >
+              <div className="flex items-center gap-2 font-bold text-base text-[#102E36]">
+                <UserPlus className="w-5 h-5 text-[#287A59]" />
+                Create Authorised Sub-Admin Account (MFA Enforced)
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <input
+                  required
+                  value={saFullName}
+                  onChange={(e) => setSaFullName(e.target.value)}
+                  placeholder="Officer Full Name"
+                  className="px-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15"
+                />
+                <input
+                  type="email"
+                  required
+                  value={saEmail}
+                  onChange={(e) => setSaEmail(e.target.value)}
+                  placeholder="officer@humanityconnect.org"
+                  className="px-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15"
+                />
+                <input
+                  type="password"
+                  required
+                  minLength={10}
+                  value={saPassword}
+                  onChange={(e) => setSaPassword(e.target.value)}
+                  placeholder="Temporary Strong Password (10+ chars)"
+                  className="px-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15"
+                />
+                <select
+                  value={saRoleCode}
+                  onChange={(e) => setSaRoleCode(e.target.value as RoleCode)}
+                  className="px-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15"
+                >
+                  {SUB_ADMIN_ROLE_CODES.map((rc) => (
+                    <option key={rc} value={rc}>
+                      {ROLE_DEFINITIONS[rc]?.label || rc}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                {SUB_ADMIN_PERMISSION_FLAGS.map((flag) => {
+                  const checked = saFlags.includes(flag.code);
+                  return (
+                    <label
+                      key={flag.code}
+                      className={`p-2.5 rounded-xl border cursor-pointer flex items-start gap-2 ${
+                        checked ? 'bg-[#287A59]/10 border-[#287A59]/40' : 'bg-white border-[#102E36]/12'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          setSaFlags((prev) =>
+                            prev.includes(flag.code) ? prev.filter((f) => f !== flag.code) : [...prev, flag.code]
+                          )
+                        }
+                      />
+                      <div>
+                        <div className="font-semibold text-[#102E36]">{flag.category}</div>
+                        <div className="text-[11px] text-[#4A636A]">{flag.code}</div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+              <input
+                value={saReason}
+                onChange={(e) => setSaReason(e.target.value)}
+                placeholder="Additional authorisation justification (min 10 chars for Finance, HR, Safeguarding, Auditor)..."
+                className="w-full px-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15"
+              />
+              <GlossyButton type="submit" size="sm" variant="teal" disabled={permBusy}>
+                Provision Sub-Admin Account
+              </GlossyButton>
+            </form>
+          )}
+
           <div className="hc-card p-6 space-y-4">
-            <div className="flex items-center gap-2">
-              <Users className="w-5 h-5 text-[#287A59]" />
-              <h3 className="text-lg font-bold text-[#102E36]">User Governance & RBAC Role Assignment</h3>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Users className="w-5 h-5 text-[#287A59]" />
+                <h3 className="text-lg font-bold text-[#102E36]">
+                  User Governance & Least-Privilege Permission Mapping
+                </h3>
+              </div>
+              <div className="flex gap-1.5 text-xs">
+                {[
+                  { id: 'ALL', label: 'All Accounts' },
+                  { id: 'SUB_ADMINS', label: 'Sub-Admins & Officers' },
+                  { id: 'NON_ADMIN', label: 'Members & Supporters' },
+                ].map((flt) => (
+                  <button
+                    key={flt.id}
+                    type="button"
+                    onClick={() => setUserFilter(flt.id as any)}
+                    className={`px-3 py-1.5 rounded-lg font-semibold ${
+                      userFilter === flt.id
+                        ? 'bg-[#102E36] text-[#FAF9F6]'
+                        : 'bg-white border border-[#102E36]/15 text-[#102E36]'
+                    }`}
+                  >
+                    {flt.label}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead className="border-b border-[#102E36]/15 text-[#4A636A]">
                   <tr>
                     <th className="py-2 pr-4">User</th>
-                    <th className="py-2 pr-4">Assigned Roles</th>
+                    <th className="py-2 pr-4">Assigned Roles & Granular Flags</th>
                     <th className="py-2 pr-4">MFA</th>
                     <th className="py-2 pr-4">Status</th>
                     <th className="py-2">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#102E36]/10">
-                  {(adminData?.users || []).map((u: any) => (
-                    <tr key={u.id}>
-                      <td className="py-3 pr-4">
-                        <div className="font-bold text-[#102E36]">{u.fullName}</div>
-                        <div className="text-[#4A636A]">{u.email}</div>
-                      </td>
-                      <td className="py-3 pr-4 font-mono-num">{(u.roles || []).join(', ')}</td>
-                      <td className="py-3 pr-4">{u.mfaEnabled ? 'Enabled' : 'Off'}</td>
-                      <td className="py-3 pr-4 font-semibold text-[#287A59]">{u.approvalStatus}</td>
-                      <td className="py-3 flex flex-wrap gap-1.5">
-                        <GlossyButton
-                          size="sm"
-                          variant="ivory"
-                          onClick={async () => {
-                            await apiFetch(`/api/admin/users/${u.id}/manage`, {
-                              method: 'POST',
-                              body: JSON.stringify({ assignRoleCode: 'FIELD_OFFICER' }),
-                            });
-                            await loadAll();
-                          }}
-                        >
-                          + Field Officer
-                        </GlossyButton>
-                        <GlossyButton
-                          size="sm"
-                          variant="teal"
-                          onClick={async () => {
-                            await apiFetch(`/api/admin/users/${u.id}/manage`, {
-                              method: 'POST',
-                              body: JSON.stringify({
-                                approvalStatus: u.approvalStatus === 'SUSPENDED' ? 'ACTIVE' : 'SUSPENDED',
-                              }),
-                            });
-                            await loadAll();
-                          }}
-                        >
-                          {u.approvalStatus === 'SUSPENDED' ? 'Reactivate' : 'Suspend'}
-                        </GlossyButton>
-                      </td>
-                    </tr>
-                  ))}
+                  {(adminData?.users || [])
+                    .filter((u: any) => {
+                      const hasAdminRole = (u.roles || []).some(
+                        (r: string) => r === 'SUPER_ADMIN' || SUB_ADMIN_ROLE_CODES.includes(r as RoleCode)
+                      );
+                      if (userFilter === 'SUB_ADMINS') return hasAdminRole;
+                      if (userFilter === 'NON_ADMIN') return !hasAdminRole;
+                      return true;
+                    })
+                    .map((u: any) => (
+                      <tr key={u.id}>
+                        <td className="py-3 pr-4">
+                          <div className="font-bold text-[#102E36]">{u.fullName}</div>
+                          <div className="text-[#4A636A]">{u.email}</div>
+                        </td>
+                        <td className="py-3 pr-4">
+                          <div className="font-mono-num font-semibold text-[#102E36]">
+                            {(u.roles || []).join(', ')}
+                          </div>
+                          {(u.permissions || []).length > 0 && (
+                            <div className="text-[11px] font-mono-num text-[#287A59] mt-0.5">
+                              Flags: {(u.permissions || []).join(' · ')}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 pr-4">{u.mfaEnabled ? 'Enabled' : 'Off'}</td>
+                        <td className="py-3 pr-4 font-semibold text-[#287A59]">{u.approvalStatus}</td>
+                        <td className="py-3 flex flex-wrap gap-1.5">
+                          {user?.roles.includes('SUPER_ADMIN') && (
+                            <GlossyButton
+                              size="sm"
+                              variant="gold"
+                              onClick={async () => {
+                                const firstSubRole =
+                                  (u.roles || []).find((r: string) =>
+                                    SUB_ADMIN_ROLE_CODES.includes(r as RoleCode)
+                                  ) || 'VERIFICATION_OFFICER';
+                                const initFlags = u.permissions || [];
+                                setPermModalUser(u);
+                                setPermTargetRole(firstSubRole as RoleCode);
+                                setPermFlags(initFlags);
+                                setPermAuthReason('');
+                                try {
+                                  const res = await apiFetch<{ preview: any }>('/api/admin/permissions/preview', {
+                                    method: 'POST',
+                                    body: JSON.stringify({
+                                      targetRoleCode: firstSubRole,
+                                      permissionFlags: initFlags,
+                                    }),
+                                  });
+                                  setPermPreview(res.preview);
+                                } catch {
+                                  setPermPreview(null);
+                                }
+                              }}
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              Map & Preview Permissions
+                            </GlossyButton>
+                          )}
+                          <GlossyButton
+                            size="sm"
+                            variant="teal"
+                            onClick={async () => {
+                              await apiFetch(`/api/admin/users/${u.id}/manage`, {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                  approvalStatus: u.approvalStatus === 'SUSPENDED' ? 'ACTIVE' : 'SUSPENDED',
+                                }),
+                              });
+                              await loadAll();
+                            }}
+                          >
+                            {u.approvalStatus === 'SUSPENDED' ? 'Reactivate' : 'Suspend'}
+                          </GlossyButton>
+                        </td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+
+          {/* 12-Verb Least-Privilege Role Matrix & Access Audit Log */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="hc-card p-6 space-y-3">
+              <h3 className="text-base font-bold text-[#102E36]">
+                12-Verb Separation-of-Duties Role Matrix
+              </h3>
+              <div className="space-y-2 max-h-72 overflow-y-auto text-xs">
+                {Object.entries(adminData?.rolePermissionMatrix || {}).map(([roleCode, verbs]: [string, any]) => (
+                  <div key={roleCode} className="p-3 rounded-xl bg-white border border-[#102E36]/12">
+                    <div className="font-mono-num font-bold text-[#102E36]">{roleCode}</div>
+                    <div className="text-[#287A59] mt-0.5">{(verbs || []).join(' · ')}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="hc-card p-6 space-y-3">
+              <h3 className="text-base font-bold text-[#102E36]">
+                Sensitive Access & Permission Change Audit Log ({(adminData?.accessAuditLogs || []).length})
+              </h3>
+              <div className="space-y-2 max-h-72 overflow-y-auto text-xs">
+                {(adminData?.accessAuditLogs || []).length === 0 ? (
+                  <div className="text-[#4A636A]">No permission reassignment audit logs recorded yet.</div>
+                ) : (
+                  (adminData?.accessAuditLogs || []).map((log: any) => (
+                    <div key={log.id} className="p-2.5 rounded-xl bg-white border border-[#102E36]/10 space-y-0.5">
+                      <div className="flex justify-between gap-2">
+                        <strong className="text-[#102E36]">{log.action}</strong>
+                        <span className="font-mono-num text-[#4A636A]">
+                          {new Date(log.createdAt).toLocaleString('en-KE')}
+                        </span>
+                      </div>
+                      <div className="text-[#4A636A] truncate">{JSON.stringify(log.details || {})}</div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           </div>
 
@@ -1434,7 +1700,9 @@ export const AdminVerificationPortal: React.FC = () => {
             </div>
 
             <div className="hc-card p-6 space-y-3">
-              <h3 className="text-base font-bold text-[#102E36]">Immutable Security & Financial Audit Log</h3>
+              <h3 className="text-base font-bold text-[#102E36]">
+                Immutable Security & Financial Audit Log (Append-Only)
+              </h3>
               <div className="space-y-2 max-h-64 overflow-y-auto text-xs">
                 {(adminData?.auditLogs || []).map((log: any) => (
                   <div key={log.id} className="p-2.5 rounded-xl bg-white border border-[#102E36]/10 flex justify-between gap-2">
@@ -1451,6 +1719,159 @@ export const AdminVerificationPortal: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Interactive Permission Mapping & Live 12-Verb Preview Modal */}
+      <ModalDialog
+        open={Boolean(permModalUser)}
+        title={permModalUser ? `Permission Preview & Mapping — ${permModalUser.fullName}` : ''}
+        subtitle="Preview all 12 granted action verbs and separation-of-duties conflicts before committing."
+        onClose={() => setPermModalUser(null)}
+      >
+        {permModalUser && (
+          <form
+            className="space-y-4 text-xs"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setPermBusy(true);
+              setErrorMsg(null);
+              try {
+                await apiFetch(`/api/admin/users/${permModalUser.id}/permissions`, {
+                  method: 'PUT',
+                  body: JSON.stringify({
+                    roleCode: permTargetRole,
+                    permissionFlags: permFlags,
+                    additionalAuthorizationReason: permAuthReason || undefined,
+                  }),
+                });
+                setPermModalUser(null);
+                await loadAll();
+                setFeedback(`Permissions updated and audited for ${permModalUser.fullName}.`);
+              } catch (err: any) {
+                setErrorMsg(err.message);
+              } finally {
+                setPermBusy(false);
+              }
+            }}
+          >
+            <div>
+              <label className="block font-semibold mb-1">Primary Sub-Admin Role Classification</label>
+              <select
+                value={permTargetRole}
+                onChange={async (e) => {
+                  const nextRole = e.target.value as RoleCode;
+                  setPermTargetRole(nextRole);
+                  try {
+                    const res = await apiFetch<{ preview: any }>('/api/admin/permissions/preview', {
+                      method: 'POST',
+                      body: JSON.stringify({ targetRoleCode: nextRole, permissionFlags: permFlags }),
+                    });
+                    setPermPreview(res.preview);
+                  } catch {
+                    // ignore
+                  }
+                }}
+                className="w-full px-3 py-2 rounded-xl bg-white border border-[#102E36]/15"
+              >
+                {SUB_ADMIN_ROLE_CODES.map((rc) => (
+                  <option key={rc} value={rc}>
+                    {ROLE_DEFINITIONS[rc]?.label || rc} ({rc})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {SUB_ADMIN_PERMISSION_FLAGS.map((flag) => {
+                const checked = permFlags.includes(flag.code);
+                return (
+                  <label
+                    key={flag.code}
+                    className={`p-2.5 rounded-xl border cursor-pointer flex items-start gap-2 ${
+                      checked ? 'bg-[#287A59]/10 border-[#287A59]/40' : 'bg-white border-[#102E36]/12'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={async () => {
+                        const nextFlags = checked
+                          ? permFlags.filter((f) => f !== flag.code)
+                          : [...permFlags, flag.code];
+                        setPermFlags(nextFlags);
+                        try {
+                          const res = await apiFetch<{ preview: any }>('/api/admin/permissions/preview', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                              targetRoleCode: permTargetRole,
+                              permissionFlags: nextFlags,
+                            }),
+                          });
+                          setPermPreview(res.preview);
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                    />
+                    <div>
+                      <div className="font-semibold text-[#102E36]">{flag.label}</div>
+                      <div className="text-[11px] text-[#4A636A]">{flag.description}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+
+            {permPreview && (
+              <div className="p-3.5 rounded-xl bg-[#FAF9F6] border border-[#102E36]/15 space-y-2">
+                <div className="font-bold text-[#102E36]">Live Permission Preview (12 Standard Action Verbs)</div>
+                <div className="text-[#287A59] font-semibold">
+                  Granted Verbs: {(permPreview.grantedVerbs || []).join(' · ') || 'View only'}
+                </div>
+                {(permPreview.enforcedSafeguards || []).length > 0 && (
+                  <ul className="list-disc pl-4 text-[#4A636A]">
+                    {permPreview.enforcedSafeguards.map((s: string, i: number) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ul>
+                )}
+                {(permPreview.conflicts || []).length > 0 && (
+                  <div className="p-2.5 rounded-lg bg-[#9F2D20]/10 border border-[#9F2D20]/30 text-[#9F2D20] font-semibold">
+                    Separation-of-Duties Conflicts Blocked: {permPreview.conflicts.join(' | ')}
+                  </div>
+                )}
+                {permPreview.requiresAdditionalAuthorization && (
+                  <div>
+                    <label className="block font-bold text-[#9F2D20] mb-1">
+                      Additional Authorisation Justification Required (Critical Role / Privileged Flag)
+                    </label>
+                    <input
+                      required
+                      minLength={10}
+                      value={permAuthReason}
+                      onChange={(e) => setPermAuthReason(e.target.value)}
+                      placeholder="Document Super Admin / Board authorisation rationale (min 10 chars)..."
+                      className="w-full px-3 py-2 rounded-xl bg-white border border-[#9F2D20]/40"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <GlossyButton type="button" variant="ivory" onClick={() => setPermModalUser(null)}>
+                Cancel
+              </GlossyButton>
+              <GlossyButton
+                type="submit"
+                variant="teal"
+                disabled={permBusy || (permPreview?.conflicts || []).length > 0}
+              >
+                Commit Audited Role Assignment
+              </GlossyButton>
+            </div>
+          </form>
+        )}
+      </ModalDialog>
     </div>
   );
 };

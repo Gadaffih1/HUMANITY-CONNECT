@@ -7,12 +7,13 @@ import {
   userRoles,
   rolePermissions,
   permissions,
+  userPermissions,
   userSessions,
   auditLogs,
 } from '../db/schema.ts';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import { sha256Hex, verifySessionToken } from '../lib/crypto.ts';
-import type { ApprovalStatus, RoleCode } from '../types/domain.ts';
+import { ADMIN_ACCESS_ROLE_CODES, type ApprovalStatus, type RoleCode } from '../types/domain.ts';
 
 export interface AuthenticatedContext {
   userId: string;
@@ -70,6 +71,12 @@ export async function loadUserAuthContext(
       rp.forEach((p) => permSet.add(p.code));
     }
   }
+
+  const directPerms = await db
+    .select({ code: userPermissions.permissionCode })
+    .from(userPermissions)
+    .where(eq(userPermissions.userId, userRow.id));
+  directPerms.forEach((p) => permSet.add(p.code));
 
   const activeRole: RoleCode =
     requestedRole && roleCodes.includes(requestedRole as RoleCode)
@@ -277,12 +284,39 @@ export const requirePermission = (permissionCode: string) => {
   };
 };
 
+export const requireAnyAdminOrPermission = (requiredFlag?: string) => {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.authUser) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    if (req.authUser.roles.includes('SUPER_ADMIN')) {
+      return next();
+    }
+    const hasAdminRole = req.authUser.roles.some((r) => ADMIN_ACCESS_ROLE_CODES.includes(r));
+    const hasFlag = requiredFlag
+      ? req.authUser.permissions.includes(requiredFlag)
+      : req.authUser.permissions.some((p) => p.startsWith('can'));
+    if (!hasAdminRole && !hasFlag) {
+      return res.status(403).json({
+        error: requiredFlag
+          ? `Access denied. Required permission flag: ${requiredFlag}.`
+          : 'Access denied. Sub-admin or officer privileges required.',
+      });
+    }
+    if (requiredFlag && !req.authUser.permissions.includes(requiredFlag)) {
+      return res.status(403).json({
+        error: `Missing granular permission flag: ${requiredFlag}.`,
+      });
+    }
+    next();
+  };
+};
+
 export const requirePrivilegedMfa = (req: AuthRequest, res: Response, next: NextFunction) => {
   if (!req.authUser) {
     return res.status(401).json({ error: 'Authentication required.' });
   }
-  const isPrivileged =
-    req.authUser.roles.includes('SUPER_ADMIN') || req.authUser.roles.includes('FIELD_OFFICER');
+  const isPrivileged = req.authUser.roles.some((r) => ADMIN_ACCESS_ROLE_CODES.includes(r));
   if (isPrivileged && req.authUser.mfaEnabled && !req.authUser.mfaVerifiedInSession) {
     return res.status(403).json({
       error: 'Multi-factor authentication (MFA) verification is required for this privileged action.',

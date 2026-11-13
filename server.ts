@@ -14,6 +14,7 @@ import { paymentsRouter } from './src/routes/payments.routes.ts';
 import { operationsRouter } from './src/routes/operations.routes.ts';
 import { communicationsRouter } from './src/routes/communications.routes.ts';
 import { matchingRouter } from './src/routes/matching.routes.ts';
+import { staffRouter } from './src/routes/staff.routes.ts';
 
 async function startServer() {
   const app = express();
@@ -47,6 +48,7 @@ async function startServer() {
   app.use('/api/operations', operationsRouter);
   app.use('/api/communications', communicationsRouter);
   app.use('/api/matching', matchingRouter);
+  app.use('/api/staff', staffRouter);
   app.use('/api/admin', adminRouter);
   app.use('/api/ai', aiRouter);
 

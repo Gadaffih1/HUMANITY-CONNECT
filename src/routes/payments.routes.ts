@@ -427,7 +427,7 @@ paymentsRouter.post('/mpesa/stk-query', requireAuth, async (req: AuthRequest, re
 paymentsRouter.post(
   '/approvals/request',
   requireAuth,
-  requireRole('SUPER_ADMIN', 'FIELD_OFFICER'),
+  requireRole('SUPER_ADMIN', 'FINANCE_OFFICER', 'FIELD_OFFICER'),
   requirePrivilegedMfa,
   async (req: AuthRequest, res) => {
     const schema = z.object({
@@ -456,7 +456,7 @@ paymentsRouter.post(
 paymentsRouter.post(
   '/approvals/:id/decide',
   requireAuth,
-  requireRole('SUPER_ADMIN'),
+  requireRole('SUPER_ADMIN', 'FINANCE_OFFICER'),
   requirePrivilegedMfa,
   async (req: AuthRequest, res) => {
     const { decision } = req.body as { decision?: 'APPROVED' | 'REJECTED' };
@@ -501,7 +501,19 @@ paymentsRouter.post(
 paymentsRouter.get(
   '/reports/monthly',
   requireAuth,
-  requireRole('SUPER_ADMIN', 'FIELD_OFFICER', 'WELL_WISHER'),
+  requireRole(
+    'SUPER_ADMIN',
+    'FINANCE_OFFICER',
+    'AUDITOR',
+    'FIELD_OFFICER',
+    'VERIFICATION_OFFICER',
+    'WELFARE_OFFICER',
+    'COUNTY_REPRESENTATIVE',
+    'DATA_MANAGEMENT_OFFICER',
+    'HR_OFFICER',
+    'SAFEGUARDING_OFFICER',
+    'WELL_WISHER'
+  ),
   async (_req: AuthRequest, res) => {
     const [journals, approvals, pledgesSummary, verifiedSummary, funds] = await Promise.all([
       db.select().from(ledgerEntries).orderBy(desc(ledgerEntries.createdAt)).limit(100),

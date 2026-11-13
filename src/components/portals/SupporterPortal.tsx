@@ -12,7 +12,18 @@ import {
   MessageSquare,
   Sparkles,
   HelpCircle,
+  TrendingUp,
 } from 'lucide-react';
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+} from 'recharts';
 import { useAuth } from '../../context/AuthContext';
 import {
   GlossyButton,
@@ -31,6 +42,12 @@ import {
   type MatchingResponsePayload,
 } from '../matching/SponsorshipMatchingPanel';
 import { WhyMatchModal } from '../matching/WhyMatchModal';
+
+interface ImpactTimelinePoint {
+  month: string;
+  disbursedMinor: number;
+  targetMinor: number;
+}
 
 type SupporterTab =
   | 'dashboard'
@@ -116,6 +133,7 @@ export const SupporterPortal: React.FC<{
   const [detailCase, setDetailCase] = useState<PublicBeneficiaryCardData | null>(null);
   const [proactiveMatches, setProactiveMatches] = useState<MatchRecommendationItem[]>([]);
   const [whyMatchTarget, setWhyMatchTarget] = useState<MatchRecommendationItem | null>(null);
+  const [impactTimeline, setImpactTimeline] = useState<ImpactTimelinePoint[]>([]);
 
   const loadAll = async () => {
     try {
@@ -127,6 +145,14 @@ export const SupporterPortal: React.FC<{
       setPortal(pRes);
       setPublicCases(bRes.beneficiaries || []);
       setCategories(ovRes.categories || []);
+      try {
+        const timelineRes = await apiFetch<{ currency: string; points: ImpactTimelinePoint[] }>(
+          '/api/supporter/impact-timeline'
+        );
+        setImpactTimeline(timelineRes.points || []);
+      } catch {
+        // Non-blocking timeline load
+      }
       try {
         const matchRes = await apiFetch<MatchingResponsePayload>(
           '/api/matching/suggested?refreshAi=false'
@@ -316,6 +342,85 @@ export const SupporterPortal: React.FC<{
                 {(portal?.recurringSchedules || []).filter((r: any) => r.status === 'ACTIVE').length}
               </div>
             </div>
+          </div>
+
+          {/* Impact Over Time (Recharts Cumulative Area Chart) */}
+          <div className="hc-card p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[#287A59] flex items-center gap-1.5">
+                  <TrendingUp className="w-3.5 h-3.5 text-[#D9A84E]" />
+                  Verified Humanitarian Trajectory
+                </div>
+                <h3 className="text-lg font-bold text-[#102E36]">Impact Over Time</h3>
+              </div>
+              <span className="text-xs font-mono-num text-[#4A636A]">
+                Cumulative Settled Disbursements vs Human-Approved Targets (KES)
+              </span>
+            </div>
+
+            {impactTimeline.length === 0 ? (
+              <div className="p-6 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10 text-xs text-[#4A636A] text-center">
+                No settled disbursements or human-approved funding targets recorded yet.
+              </div>
+            ) : (
+              <div className="w-full h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart
+                    data={impactTimeline.map((pt) => ({
+                      month: pt.month,
+                      disbursedKes: Math.round(pt.disbursedMinor / 100),
+                      targetKes: Math.round(pt.targetMinor / 100),
+                    }))}
+                    margin={{ top: 10, right: 16, left: 4, bottom: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id="hcDisbursedGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#287A59" stopOpacity={0.35} />
+                        <stop offset="95%" stopColor="#287A59" stopOpacity={0.02} />
+                      </linearGradient>
+                      <linearGradient id="hcTargetGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#D9A84E" stopOpacity={0.28} />
+                        <stop offset="95%" stopColor="#D9A84E" stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#102E36" strokeOpacity={0.1} />
+                    <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#4A636A' }} />
+                    <YAxis
+                      tick={{ fontSize: 11, fill: '#4A636A' }}
+                      tickFormatter={(v) => `${Math.round(Number(v) / 1000)}k`}
+                    />
+                    <Tooltip
+                      formatter={(val: any, name: any) => [
+                        `KES ${Number(val || 0).toLocaleString('en-KE')}`,
+                        name === 'disbursedKes' ? 'Settled Disbursements' : 'Approved Need Targets',
+                      ]}
+                    />
+                    <Legend
+                      formatter={(value) =>
+                        value === 'disbursedKes' ? 'Settled Disbursements (KES)' : 'Approved Need Targets (KES)'
+                      }
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="targetKes"
+                      stroke="#D9A84E"
+                      strokeWidth={2}
+                      fillOpacity={1}
+                      fill="url(#hcTargetGrad)"
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="disbursedKes"
+                      stroke="#287A59"
+                      strokeWidth={2.5}
+                      fillOpacity={1}
+                      fill="url(#hcDisbursedGrad)"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
           </div>
 
           {/* Proactive AI Match Suggestions on Supporter Dashboard */}

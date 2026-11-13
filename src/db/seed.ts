@@ -18,8 +18,10 @@ import {
   organisations,
   empowermentMilestones,
   matchingEngineConfig,
+  staffPositions,
 } from './schema.ts';
 import { encryptSensitiveText } from '../lib/crypto.ts';
+import { STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
 
 let seedPromise: Promise<void> | null = null;
 
@@ -84,7 +86,79 @@ async function runSeed(): Promise<void> {
     {
       code: 'FIELD_OFFICER',
       name: 'Field Officer',
-      description: 'Authorised verification, social welfare, and safeguarding field specialist.',
+      description: 'Authorised regional verification and community field visit specialist.',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'VERIFICATION_OFFICER',
+      name: 'Verification Officer',
+      description: 'Authorised to verify accounts and recommend need approvals (cannot release funds).',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'WELFARE_OFFICER',
+      name: 'Social Welfare Officer',
+      description: 'Authorised welfare officer managing household follow-ups and family support.',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'COUNTY_REPRESENTATIVE',
+      name: 'County Representative',
+      description: 'Authorised county coordinator restricted to assigned county geography.',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'DATA_MANAGEMENT_OFFICER',
+      name: 'Data Management Officer',
+      description: 'Authorised M&E and data quality officer managing integrity & audit exports.',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'FINANCE_OFFICER',
+      name: 'Finance & Accounts Officer',
+      description: 'Authorised to process verified payments (cannot self-approve own transactions).',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'HR_OFFICER',
+      name: 'HR Officer',
+      description: 'Authorised to manage staff records, JDs, and recruitment (excluded from unrelated safeguarding).',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'SAFEGUARDING_OFFICER',
+      name: 'Safeguarding Officer',
+      description: 'Protected independent access to sensitive safeguarding & child protection cases.',
+      isBeneficiaryRole: false,
+      isPrivileged: true,
+      requiresMfa: true,
+      selfAssignable: false,
+    },
+    {
+      code: 'AUDITOR',
+      name: 'Independent Auditor',
+      description: 'Independent read-only audit & compliance review access across ledgers and logs.',
       isBeneficiaryRole: false,
       isPrivileged: true,
       requiresMfa: true,
@@ -118,7 +192,17 @@ async function runSeed(): Promise<void> {
     { code: 'safeguarding:manage', module: 'safeguarding', description: 'Review and resolve safeguarding incidents' },
     { code: 'finance:disburse', module: 'finance', description: 'Approve fund allocations and verified disbursements' },
     { code: 'admin:rbac_manage', module: 'admin', description: 'Assign roles, manage permissions, and suspend accounts' },
+    { code: 'hr:manage', module: 'hr', description: 'Manage staff establishment, JDs, recruitment, and profiles' },
+    { code: 'audit:read', module: 'audit', description: 'Independent read-only audit and compliance inspection' },
     { code: 'ai:assist', module: 'ai', description: 'Use server-side Gemini humanitarian assistance tools' },
+    { code: 'canVerifyNeed', module: 'rbac', description: 'Granular flag: Assess and recommend beneficiary needs' },
+    { code: 'canVerifyUsers', module: 'rbac', description: 'Granular flag: Verify beneficiary & user accounts' },
+    { code: 'canDisburseFunds', module: 'rbac', description: 'Granular flag: Process authorised fund disbursements' },
+    { code: 'canManageFinanceAccounts', module: 'rbac', description: 'Granular flag: Manage trust fund pools and reconciliations' },
+    { code: 'canManageSafeguarding', module: 'rbac', description: 'Granular flag: Manage protected safeguarding cases' },
+    { code: 'canManageCountyOps', module: 'rbac', description: 'Granular flag: Coordinate assigned county field operations' },
+    { code: 'canManageData', module: 'rbac', description: 'Granular flag: Manage data quality, M&E, and analytics' },
+    { code: 'canManageHR', module: 'rbac', description: 'Granular flag: Manage HR staff records, JDs, and recruitment' },
   ];
 
   for (const p of permSeeds) {
@@ -136,12 +220,15 @@ async function runSeed(): Promise<void> {
     NEEDY: ['beneficiary:own_read', 'beneficiary:own_write', 'ai:assist'],
     SUPPORTIVE: ['supporter:browse_public', 'supporter:donate', 'ai:assist'],
     WELL_WISHER: ['supporter:browse_public', 'supporter:donate', 'corporate:csr_manage', 'ai:assist'],
-    FIELD_OFFICER: [
-      'verification:review',
-      'needs:human_approve',
-      'safeguarding:manage',
-      'ai:assist',
-    ],
+    FIELD_OFFICER: ['verification:review', 'canManageCountyOps', 'ai:assist'],
+    VERIFICATION_OFFICER: ['verification:review', 'verification:decide', 'needs:human_approve', 'canVerifyUsers', 'canVerifyNeed', 'ai:assist'],
+    WELFARE_OFFICER: ['verification:review', 'needs:human_approve', 'safeguarding:manage', 'canVerifyNeed', 'ai:assist'],
+    COUNTY_REPRESENTATIVE: ['verification:review', 'canManageCountyOps', 'canVerifyUsers', 'ai:assist'],
+    DATA_MANAGEMENT_OFFICER: ['audit:read', 'canManageData', 'ai:assist'],
+    FINANCE_OFFICER: ['finance:disburse', 'canDisburseFunds', 'canManageFinanceAccounts', 'ai:assist'],
+    HR_OFFICER: ['hr:manage', 'canManageHR', 'ai:assist'],
+    SAFEGUARDING_OFFICER: ['safeguarding:manage', 'canManageSafeguarding', 'audit:read', 'ai:assist'],
+    AUDITOR: ['audit:read', 'canManageData'],
     SUPER_ADMIN: allPerms.map((p) => p.code),
   };
 
@@ -632,6 +719,19 @@ async function runSeed(): Promise<void> {
           specificChallenges: patch.challenges,
         })
         .where(eq(beneficiaryProfiles.referenceCode, patch.ref));
+    }
+  }
+
+  // 6. Seed all 170 Approved Establishment Positions (zero fake employees or appointments)
+  const [{ staffCount }] = await db
+    .select({ staffCount: sql<number>`count(*)::int` })
+    .from(staffPositions);
+  if (staffCount < STAFF_ESTABLISHMENT_170.length) {
+    for (const pos of STAFF_ESTABLISHMENT_170) {
+      await db
+        .insert(staffPositions)
+        .values(pos)
+        .onConflictDoNothing({ target: staffPositions.jobId });
     }
   }
 }

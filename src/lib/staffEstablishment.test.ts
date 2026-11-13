@@ -1,0 +1,113 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  ORGANISATIONAL_DEPARTMENTS,
+  STAFF_ESTABLISHMENT_170,
+} from '../data/staffEstablishment.ts';
+import {
+  buildPermissionPreview,
+  screenGeneralCommunicationForConfidentiality,
+  userCanViewSafeguardingCases,
+} from './rbacPolicy.ts';
+import {
+  KENYAN_47_COUNTIES,
+  RECRUITMENT_STAGES,
+  STAFF_EMPLOYMENT_STATUSES,
+} from '../types/domain.ts';
+
+test('Establishment contains all 170 unique positions across 15 departments with zero fake incumbents', () => {
+  assert.equal(ORGANISATIONAL_DEPARTMENTS.length, 15);
+  assert.equal(STAFF_ESTABLISHMENT_170.length, 170);
+
+  const plannedSum = ORGANISATIONAL_DEPARTMENTS.reduce((sum, d) => sum + d.plannedCount, 0);
+  assert.equal(plannedSum, 170);
+
+  const seenIds = new Set<string>();
+  const deptCounts = new Map<number, number>();
+  for (const pos of STAFF_ESTABLISHMENT_170) {
+    assert.ok(!seenIds.has(pos.jobId), `Duplicate jobId detected: ${pos.jobId}`);
+    seenIds.add(pos.jobId);
+    deptCounts.set(pos.departmentNumber, (deptCounts.get(pos.departmentNumber) || 0) + 1);
+    assert.equal(pos.incumbentName, null, `Position ${pos.jobId} must not ship with fake incumbent`);
+    assert.equal(pos.vacancyStatus, 'VACANT');
+    assert.ok(pos.mainResponsibilities.length > 0);
+    assert.ok(pos.dailyResponsibilities.length > 0);
+    assert.ok(pos.weeklyResponsibilities.length > 0);
+    assert.ok(pos.monthlyResponsibilities.length > 0);
+    assert.ok(pos.requiredQualifications.length > 5);
+    assert.ok(pos.professionalQualifications.length > 3);
+  }
+
+  for (const dept of ORGANISATIONAL_DEPARTMENTS) {
+    assert.equal(
+      deptCounts.get(dept.number),
+      dept.plannedCount,
+      `Department ${dept.number} (${dept.name}) count mismatch`
+    );
+  }
+});
+
+test('Organisational reporting hierarchy is a valid acyclic DAG referencing existing supervisors', () => {
+  const map = new Map(STAFF_ESTABLISHMENT_170.map((p) => [p.jobId, p.reportsToJobId]));
+  for (const pos of STAFF_ESTABLISHMENT_170) {
+    if (pos.reportsToJobId) {
+      assert.ok(
+        map.has(pos.reportsToJobId),
+        `Position ${pos.jobId} references missing supervisor ${pos.reportsToJobId}`
+      );
+    }
+    const visited = new Set<string>([pos.jobId]);
+    let cursor = pos.reportsToJobId;
+    while (cursor) {
+      assert.ok(!visited.has(cursor), `Cycle detected at ${pos.jobId} -> ${cursor}`);
+      visited.add(cursor);
+      cursor = map.get(cursor) || null;
+    }
+  }
+});
+
+test('Kenya geography includes all 47 counties, 15 recruitment stages, and 9 staff statuses', () => {
+  assert.equal(KENYAN_47_COUNTIES.length, 47);
+  assert.equal(new Set(KENYAN_47_COUNTIES).size, 47);
+  assert.equal(RECRUITMENT_STAGES.length, 15);
+  assert.equal(STAFF_EMPLOYMENT_STATUSES.length, 9);
+});
+
+test('RBAC permission preview enforces separation-of-duties rules #1, #7, #8 and confidentiality screen', () => {
+  // Rule #1: Verification Officer cannot hold canDisburseFunds
+  const verifConflict = buildPermissionPreview({
+    existingRoles: ['VERIFICATION_OFFICER'],
+    newRoleCode: 'VERIFICATION_OFFICER',
+    selectedFlags: ['canVerifyUsers', 'canDisburseFunds'],
+  });
+  assert.ok(verifConflict.conflicts.length > 0);
+
+  // Rule #7: HR Officer cannot access Safeguarding investigations
+  const hrConflict = buildPermissionPreview({
+    existingRoles: ['HR_OFFICER'],
+    newRoleCode: 'HR_OFFICER',
+    selectedFlags: ['canManageHR', 'canManageSafeguarding'],
+  });
+  assert.ok(hrConflict.conflicts.length > 0);
+  assert.equal(userCanViewSafeguardingCases(['HR_OFFICER'], ['canManageHR']), false);
+  assert.equal(userCanViewSafeguardingCases(['SAFEGUARDING_OFFICER'], ['canManageSafeguarding']), true);
+
+  // Rule #8: Auditor read-only oversight cannot mutate finance or verification
+  const audConflict = buildPermissionPreview({
+    existingRoles: ['AUDITOR'],
+    newRoleCode: 'AUDITOR',
+    selectedFlags: ['canManageData', 'canDisburseFunds'],
+  });
+  assert.ok(audConflict.conflicts.length > 0);
+
+  // Confidentiality screen blocks beneficiary PII & safeguarding disclosures in general comms
+  const blocked = screenGeneralCommunicationForConfidentiality(
+    'Please update beneficiary child abuse report with National ID 12345678'
+  );
+  assert.equal(blocked.allowed, false);
+
+  const safeMsg = screenGeneralCommunicationForConfidentiality(
+    'Monthly staff coordination meeting scheduled for Friday 10:00 EAT.'
+  );
+  assert.equal(safeMsg.allowed, true);
+});
