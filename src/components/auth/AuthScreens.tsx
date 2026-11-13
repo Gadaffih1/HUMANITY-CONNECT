@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
 import {
-  ShieldCheck,
   KeyRound,
   Smartphone,
   Mail,
   Building2,
   UserCheck,
   AlertCircle,
-  CheckCircle2,
   Lock,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -187,33 +185,6 @@ export const AuthScreens: React.FC<{
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left Guidance Panel */}
         <div className="lg:col-span-5 space-y-6">
-          <div className="hc-card p-6 bg-[#102E36] text-[#FAF9F6] space-y-4">
-            <div className="flex items-center gap-2 text-xs font-semibold text-[#D9A84E]">
-              <ShieldCheck className="w-4 h-4" />
-              Safeguarding & Verified Access
-            </div>
-            <h2 className="text-2xl font-extrabold leading-snug">
-              Humanity Connect Account Portal
-            </h2>
-            <p className="text-sm text-[#FAF9F6]/80 leading-relaxed">
-              Choose the single account category that best matches your household, sponsorship, or
-              institutional giving role.
-            </p>
-            <div className="pt-4 border-t border-[#FAF9F6]/15 space-y-2.5 text-xs text-[#FAF9F6]/85">
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-[#D9A84E] shrink-0 mt-0.5" />
-                <span>Phone OTP & Email verification protect every household and supporter account.</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <Lock className="w-4 h-4 text-[#D9A84E] shrink-0 mt-0.5" />
-                <span>
-                  Super Admin and Field Officer roles cannot be self-selected; they are provisioned strictly
-                  server-side with mandatory TOTP MFA.
-                </span>
-              </div>
-            </div>
-          </div>
-
           <div className="hc-card p-5 space-y-2">
             <div className="text-xs font-semibold text-[#287A59]">Account Categories</div>
             <ul className="text-xs text-[#4A636A] space-y-1.5">

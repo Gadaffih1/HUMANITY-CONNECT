@@ -9,9 +9,12 @@ import {
   UserPlus,
   AlertTriangle,
   Clock,
+  BarChart3,
+  ListChecks,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { ExportReportBar, GlossyButton, ModalDialog } from '../ui/DesignSystem';
+import { OnboardingProgressDashboard } from './OnboardingProgressDashboard';
 
 interface OnboardingProgressTrackerPanelProps {
   canManageHr: boolean;
@@ -57,6 +60,7 @@ export const OnboardingProgressTrackerPanel: React.FC<OnboardingProgressTrackerP
   const [selectedId, setSelectedId] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [searchQ, setSearchQ] = useState('');
+  const [viewMode, setViewMode] = useState<'dashboard' | 'queue'>('dashboard');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -289,6 +293,33 @@ export const OnboardingProgressTrackerPanel: React.FC<OnboardingProgressTrackerP
             ))}
           </select>
         </div>
+        {/* View Mode Switcher */}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => setViewMode('dashboard')}
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors ${
+              viewMode === 'dashboard'
+                ? 'bg-[#102E36] text-[#FAF9F6]'
+                : 'bg-white border border-[#102E36]/15 text-[#102E36] hover:bg-[#FAF9F6]'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            Onboarding Progress Dashboard &amp; Timeline
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('queue')}
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors ${
+              viewMode === 'queue'
+                ? 'bg-[#102E36] text-[#FAF9F6]'
+                : 'bg-white border border-[#102E36]/15 text-[#102E36] hover:bg-[#FAF9F6]'
+            }`}
+          >
+            <ListChecks className="w-3.5 h-3.5" />
+            Milestone Verification Queue ({filteredChecklists.length})
+          </button>
+        </div>
       </div>
 
       {/* Main Content */}
@@ -296,6 +327,22 @@ export const OnboardingProgressTrackerPanel: React.FC<OnboardingProgressTrackerP
         <div className="hc-card p-8 text-center text-xs text-[#4A636A]">
           Loading Automated Onboarding Checklists...
         </div>
+      ) : viewMode === 'dashboard' ? (
+        <OnboardingProgressDashboard
+          checklists={filteredChecklists}
+          selectedChecklistId={activeChecklist?.id}
+          onSelectHire={(id) => {
+            setSelectedId(id);
+            setViewMode('queue');
+          }}
+          onTriggerMilestoneAction={(checklist, milestone, presetStatus) => {
+            setSelectedId(checklist.id);
+            openMilestoneModal(milestone, presetStatus);
+          }}
+          isVerifier={isVerifier}
+          isAuditor={isAuditor}
+          currentUserId={user?.id}
+        />
       ) : checklists.length === 0 ? (
         <div className="hc-card p-8 text-center space-y-2 text-xs text-[#4A636A]">
           <Clock className="w-7 h-7 text-[#D9A84E] mx-auto" />

@@ -16,6 +16,8 @@ import {
 } from '../types/domain.ts';
 import {
   buildDefaultOnboardingMilestones,
+  buildOnboardingDashboardMetrics,
+  buildPendingMilestonesTimeline,
   canVerifyOnboardingMilestone,
   computeOnboardingProgress,
   isOnboardingReadyForActivation,
@@ -156,3 +158,107 @@ test('Automated Onboarding Tracker generates 3-track milestones, computes progre
   assert.equal(doneProgress.overallStatus, 'READY_FOR_ACTIVATION');
   assert.equal(isOnboardingReadyForActivation(allVerified).ready, true);
 });
+
+test('Onboarding Progress Dashboard metrics and pending timeline sort blockers & overdue milestones first without fake data', () => {
+  // Empty input yields honest zeros
+  const emptyMetrics = buildOnboardingDashboardMetrics([], '2026-05-01');
+  assert.equal(emptyMetrics.totalHires, 0);
+  assert.equal(emptyMetrics.avgOverallPct, 0);
+  assert.equal(emptyMetrics.pendingDocumentCount, 0);
+  assert.equal(emptyMetrics.pendingTrainingCount, 0);
+  assert.equal(emptyMetrics.pendingCredentialCount, 0);
+  assert.equal(emptyMetrics.departmentReadiness.length, 0);
+  assert.equal(buildPendingMilestonesTimeline([], '2026-05-01').length, 0);
+
+  const msA = buildDefaultOnboardingMilestones({
+    jobId: 'HC-VER-001',
+    jobTitle: 'Verification Officer',
+    department: 'Verification & Eligibility Assessment',
+    requiredQualifications: 'BA Social Work',
+    professionalQualifications: 'Registered Social Worker',
+    safeguardingResponsibilities: 'Zero-tolerance safeguarding compliance',
+  });
+  // Mark 1 document REJECTED, 1 training SUBMITTED, others PENDING
+  msA[0] = { ...msA[0], status: 'REJECTED' };
+  msA[4] = { ...msA[4], status: 'SUBMITTED' };
+  const progA = computeOnboardingProgress(msA, false);
+
+  const msB = buildDefaultOnboardingMilestones({
+    jobId: 'HC-FAP-001',
+    jobTitle: 'Finance Officer',
+    department: 'Finance, Accounting & Resource Stewardship',
+    requiredQualifications: 'BCom',
+    professionalQualifications: 'CPA(K)',
+    safeguardingResponsibilities: 'Financial integrity charter',
+    applicationDocsVerified: true,
+    backgroundCleared: true,
+  });
+  // Mark all DOCUMENT_SUBMISSION verified on B
+  for (let i = 0; i < 4; i++) {
+    msB[i] = { ...msB[i], status: 'VERIFIED' };
+  }
+  const progB = computeOnboardingProgress(msB, false);
+
+  const sampleChecklists = [
+    {
+      id: 'chk-a',
+      onboardingRef: 'ONB-2026-001',
+      userId: 'u-a',
+      jobId: 'HC-VER-001',
+      departmentNumber: 4,
+      department: 'Verification & Eligibility Assessment',
+      jobTitle: 'Verification Officer',
+      newHireName: 'Applicant Alpha',
+      newHireEmail: 'alpha@example.org',
+      overallStatus: progA.overallStatus,
+      completionPct: progA.completionPct,
+      tracks: progA.tracks,
+      dueDate: '2026-04-20', // Overdue relative to 2026-05-01
+      milestones: msA,
+    },
+    {
+      id: 'chk-b',
+      onboardingRef: 'ONB-2026-002',
+      userId: 'u-b',
+      jobId: 'HC-FAP-001',
+      departmentNumber: 8,
+      department: 'Finance, Accounting & Resource Stewardship',
+      jobTitle: 'Finance Officer',
+      newHireName: 'Applicant Beta',
+      newHireEmail: 'beta@example.org',
+      overallStatus: progB.overallStatus,
+      completionPct: progB.completionPct,
+      tracks: progB.tracks,
+      dueDate: '2026-05-15',
+      milestones: msB,
+    },
+  ];
+
+  const metrics = buildOnboardingDashboardMetrics(sampleChecklists, '2026-05-01');
+  assert.equal(metrics.totalHires, 2);
+  assert.equal(metrics.overdueChecklistCount, 1);
+  assert.equal(metrics.rejectedBlockerCount, 1);
+  assert.equal(metrics.awaitingVerificationCount, 2);
+  assert.equal(metrics.trackCompletedTotals.DOCUMENT_SUBMISSION.completed, 4);
+  assert.equal(metrics.trackCompletedTotals.DOCUMENT_SUBMISSION.total, 8);
+  assert.equal(metrics.trackCompletionPct.DOCUMENT_SUBMISSION, 50);
+  assert.equal(metrics.pendingDocumentCount, 4);
+  assert.equal(metrics.pendingTrainingCount, 6);
+  assert.equal(metrics.pendingCredentialCount, 5);
+  assert.equal(metrics.departmentReadiness.length, 2);
+
+  const timeline = buildPendingMilestonesTimeline(sampleChecklists, '2026-05-01');
+  assert.equal(timeline.length, 15);
+  // First item must be REJECTED urgent blocker, next two must be SUBMITTED (overdue chk-a before chk-b)
+  assert.equal(timeline[0].milestone.status, 'REJECTED');
+  assert.equal(timeline[0].isOverdue, true);
+  assert.equal(timeline[1].milestone.status, 'SUBMITTED');
+  assert.equal(timeline[1].checklistId, 'chk-a');
+  assert.equal(timeline[2].milestone.status, 'SUBMITTED');
+  assert.equal(timeline[2].checklistId, 'chk-b');
+  // Remaining PENDING items come ordered with overdue checklist before future due dates, phase 1 before 2 before 3
+  assert.equal(timeline[3].milestone.status, 'PENDING');
+  assert.equal(timeline[3].checklistId, 'chk-a');
+  assert.equal(timeline[3].phaseOrder, 1);
+});
+

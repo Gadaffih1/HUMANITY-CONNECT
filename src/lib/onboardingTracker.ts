@@ -244,3 +244,277 @@ export function isOnboardingReadyForActivation(milestones: OnboardingMilestone[]
     .map((m) => m.title);
   return { ready: missing.length === 0, missingTitles: missing };
 }
+
+export interface OnboardingDashboardChecklistInput {
+  id: string;
+  onboardingRef: string;
+  userId?: string | null;
+  jobId: string;
+  departmentNumber: number;
+  department: string;
+  jobTitle: string;
+  newHireName: string;
+  newHireEmail: string;
+  overallStatus: string;
+  completionPct: number;
+  tracks?: Record<OnboardingCategory, OnboardingTrackSummary>;
+  completedRequiredCount?: number;
+  requiredMilestones?: number;
+  submittedCount?: number;
+  rejectedCount?: number;
+  dueDate?: string | null;
+  milestones: OnboardingMilestone[];
+}
+
+export interface DepartmentOnboardingReadiness {
+  departmentNumber: number;
+  department: string;
+  hireCount: number;
+  avgCompletionPct: number;
+  readyOrCompletedCount: number;
+  blockedCount: number;
+}
+
+export interface OnboardingDashboardMetrics {
+  totalHires: number;
+  avgOverallPct: number;
+  trackCompletionPct: Record<OnboardingCategory, number>;
+  trackCompletedTotals: Record<OnboardingCategory, { completed: number; total: number }>;
+  pendingDocumentCount: number;
+  pendingTrainingCount: number;
+  pendingCredentialCount: number;
+  awaitingVerificationCount: number;
+  rejectedBlockerCount: number;
+  overdueChecklistCount: number;
+  departmentReadiness: DepartmentOnboardingReadiness[];
+}
+
+export interface OnboardingPendingTimelineItem {
+  key: string;
+  checklistId: string;
+  onboardingRef: string;
+  userId?: string | null;
+  newHireName: string;
+  jobId: string;
+  jobTitle: string;
+  department: string;
+  dueDate: string | null;
+  isOverdue: boolean;
+  phaseOrder: number;
+  phaseLabel: string;
+  dayWindow: string;
+  milestone: OnboardingMilestone;
+}
+
+export function getOnboardingMilestoneScheduleMeta(category: OnboardingCategory): {
+  phaseOrder: number;
+  phaseLabel: string;
+  dayWindow: string;
+  shortLabel: string;
+} {
+  switch (category) {
+    case 'DOCUMENT_SUBMISSION':
+      return {
+        phaseOrder: 1,
+        phaseLabel: 'Phase 1 · Document Intake',
+        dayWindow: 'Days 1–3',
+        shortLabel: 'Document',
+      };
+    case 'TRAINING_COMPLETION':
+      return {
+        phaseOrder: 2,
+        phaseLabel: 'Phase 2 · Mandatory Training',
+        dayWindow: 'Days 4–7',
+        shortLabel: 'Training',
+      };
+    case 'CREDENTIAL_VERIFICATION':
+    default:
+      return {
+        phaseOrder: 3,
+        phaseLabel: 'Phase 3 · Credential & Security Checks',
+        dayWindow: 'Days 8–12',
+        shortLabel: 'Credential',
+      };
+  }
+}
+
+export function isChecklistOverdue(
+  dueDate?: string | null,
+  overallStatus?: string,
+  referenceDateIso?: string
+): boolean {
+  if (!dueDate || overallStatus === 'COMPLETED') return false;
+  const refDay = (referenceDateIso || new Date().toISOString()).slice(0, 10);
+  return dueDate < refDay;
+}
+
+export function buildOnboardingDashboardMetrics(
+  checklists: OnboardingDashboardChecklistInput[],
+  referenceDateIso?: string
+): OnboardingDashboardMetrics {
+  const categories: OnboardingCategory[] = [
+    'DOCUMENT_SUBMISSION',
+    'TRAINING_COMPLETION',
+    'CREDENTIAL_VERIFICATION',
+  ];
+
+  const trackCompletedTotals: Record<OnboardingCategory, { completed: number; total: number }> = {
+    DOCUMENT_SUBMISSION: { completed: 0, total: 0 },
+    TRAINING_COMPLETION: { completed: 0, total: 0 },
+    CREDENTIAL_VERIFICATION: { completed: 0, total: 0 },
+  };
+
+  let pendingDocumentCount = 0;
+  let pendingTrainingCount = 0;
+  let pendingCredentialCount = 0;
+  let awaitingVerificationCount = 0;
+  let rejectedBlockerCount = 0;
+  let overdueChecklistCount = 0;
+
+  const deptMap = new Map<
+    number,
+    {
+      departmentNumber: number;
+      department: string;
+      hireCount: number;
+      pctSum: number;
+      readyOrCompletedCount: number;
+      blockedCount: number;
+    }
+  >();
+
+  for (const c of checklists) {
+    if (isChecklistOverdue(c.dueDate, c.overallStatus, referenceDateIso)) {
+      overdueChecklistCount += 1;
+    }
+
+    const existingDept = deptMap.get(c.departmentNumber) || {
+      departmentNumber: c.departmentNumber,
+      department: c.department,
+      hireCount: 0,
+      pctSum: 0,
+      readyOrCompletedCount: 0,
+      blockedCount: 0,
+    };
+    existingDept.hireCount += 1;
+    existingDept.pctSum += c.completionPct || 0;
+    if (c.overallStatus === 'COMPLETED' || c.overallStatus === 'READY_FOR_ACTIVATION') {
+      existingDept.readyOrCompletedCount += 1;
+    }
+    if (c.overallStatus === 'BLOCKED') {
+      existingDept.blockedCount += 1;
+    }
+    deptMap.set(c.departmentNumber, existingDept);
+
+    for (const ms of c.milestones || []) {
+      const done = ms.status === 'VERIFIED' || ms.status === 'WAIVED';
+      if (trackCompletedTotals[ms.category]) {
+        trackCompletedTotals[ms.category].total += 1;
+        if (done) trackCompletedTotals[ms.category].completed += 1;
+      }
+      if (!done) {
+        if (ms.category === 'DOCUMENT_SUBMISSION') pendingDocumentCount += 1;
+        else if (ms.category === 'TRAINING_COMPLETION') pendingTrainingCount += 1;
+        else if (ms.category === 'CREDENTIAL_VERIFICATION') pendingCredentialCount += 1;
+      }
+      if (ms.status === 'SUBMITTED') awaitingVerificationCount += 1;
+      if (ms.status === 'REJECTED') rejectedBlockerCount += 1;
+    }
+  }
+
+  const totalHires = checklists.length;
+  const avgOverallPct =
+    totalHires > 0
+      ? Math.round(checklists.reduce((sum, c) => sum + (c.completionPct || 0), 0) / totalHires)
+      : 0;
+
+  const trackCompletionPct = {} as Record<OnboardingCategory, number>;
+  for (const cat of categories) {
+    const t = trackCompletedTotals[cat];
+    trackCompletionPct[cat] = t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0;
+  }
+
+  const departmentReadiness: DepartmentOnboardingReadiness[] = Array.from(deptMap.values())
+    .map((d) => ({
+      departmentNumber: d.departmentNumber,
+      department: d.department,
+      hireCount: d.hireCount,
+      avgCompletionPct: d.hireCount > 0 ? Math.round(d.pctSum / d.hireCount) : 0,
+      readyOrCompletedCount: d.readyOrCompletedCount,
+      blockedCount: d.blockedCount,
+    }))
+    .sort((a, b) => a.departmentNumber - b.departmentNumber);
+
+  return {
+    totalHires,
+    avgOverallPct,
+    trackCompletionPct,
+    trackCompletedTotals,
+    pendingDocumentCount,
+    pendingTrainingCount,
+    pendingCredentialCount,
+    awaitingVerificationCount,
+    rejectedBlockerCount,
+    overdueChecklistCount,
+    departmentReadiness,
+  };
+}
+
+export function buildPendingMilestonesTimeline(
+  checklists: OnboardingDashboardChecklistInput[],
+  referenceDateIso?: string
+): OnboardingPendingTimelineItem[] {
+  const items: OnboardingPendingTimelineItem[] = [];
+
+  for (const c of checklists) {
+    const overdue = isChecklistOverdue(c.dueDate, c.overallStatus, referenceDateIso);
+    for (const ms of c.milestones || []) {
+      if (ms.status === 'VERIFIED' || ms.status === 'WAIVED') continue;
+      const meta = getOnboardingMilestoneScheduleMeta(ms.category);
+      items.push({
+        key: `${c.id}:${ms.code}`,
+        checklistId: c.id,
+        onboardingRef: c.onboardingRef,
+        userId: c.userId,
+        newHireName: c.newHireName,
+        jobId: c.jobId,
+        jobTitle: c.jobTitle,
+        department: c.department,
+        dueDate: c.dueDate || null,
+        isOverdue: overdue,
+        phaseOrder: meta.phaseOrder,
+        phaseLabel: meta.phaseLabel,
+        dayWindow: meta.dayWindow,
+        milestone: ms,
+      });
+    }
+  }
+
+  const statusRank = (status: OnboardingMilestoneStatus): number => {
+    switch (status) {
+      case 'REJECTED':
+        return 0; // Immediate attention blocker
+      case 'SUBMITTED':
+        return 1; // Ready for HR / supervisor verification
+      case 'PENDING':
+      default:
+        return 2; // Awaiting new hire submission or completion
+    }
+  };
+
+  return items.sort((a, b) => {
+    const rankDiff = statusRank(a.milestone.status) - statusRank(b.milestone.status);
+    if (rankDiff !== 0) return rankDiff;
+
+    if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
+
+    const aDue = a.dueDate || '9999-12-31';
+    const bDue = b.dueDate || '9999-12-31';
+    if (aDue !== bDue) return aDue.localeCompare(bDue);
+
+    if (a.phaseOrder !== b.phaseOrder) return a.phaseOrder - b.phaseOrder;
+
+    return a.onboardingRef.localeCompare(b.onboardingRef);
+  });
+}
+
