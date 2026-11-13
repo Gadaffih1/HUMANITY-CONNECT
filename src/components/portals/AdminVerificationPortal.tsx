@@ -298,29 +298,35 @@ export const AdminVerificationPortal: React.FC = () => {
       )}
 
       {/* Navigation Tabs */}
-      <div className="flex flex-wrap gap-2 p-1.5 rounded-2xl bg-[#EAE6DC]/70 overflow-x-auto">
+      <div className="grid grid-cols-1 sm:grid-cols-3 auto-rows-fr gap-2.5 p-3 rounded-2xl bg-[#EAE6DC]/75 border border-[#102E36]/10">
         {[
-          { id: 'verification', label: 'Verification Centre (V0–V4)' },
-          { id: 'needs', label: 'Needs Engine (15 Cats)' },
-          { id: 'matching', label: 'AI Matching Engine' },
-          { id: 'finance', label: 'Finance & Daraja M-Pesa' },
-          { id: 'safeguarding', label: 'Safeguarding & DPIA' },
-          { id: 'empowerment', label: 'Empowerment & Projects' },
-          { id: 'field-ops', label: 'Field Ops (Offline Vault)' },
-          { id: 'staff-centre', label: 'Staff, Org & HR Centre' },
-          { id: 'governance', label: 'RBAC, Templates & Audits' },
-        ].map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => setTab(item.id as AdminTab)}
-            className={`px-3.5 py-2.5 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 min-h-[40px] transition-colors ${
-              tab === item.id ? 'bg-[#102E36] text-[#FAF9F6]' : 'text-[#102E36] hover:bg-[#FAF9F6]'
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
+          { id: 'verification', label: 'Verification Centre (V0–V4)', tone: 'hc-btn-teal' },
+          { id: 'needs', label: 'Needs Engine (15 Cats)', tone: 'hc-btn-green' },
+          { id: 'matching', label: 'AI Matching Engine', tone: 'hc-btn-indigo' },
+          { id: 'finance', label: 'Finance & Daraja M-Pesa', tone: 'hc-btn-gold' },
+          { id: 'safeguarding', label: 'Safeguarding & DPIA', tone: 'hc-btn-crimson' },
+          { id: 'empowerment', label: 'Empowerment & Projects', tone: 'hc-btn-amber' },
+          { id: 'field-ops', label: 'Field Ops (Offline Vault)', tone: 'hc-btn-moss' },
+          { id: 'staff-centre', label: 'Staff, Org & HR Centre', tone: 'hc-btn-plum' },
+          { id: 'governance', label: 'RBAC, Templates & Audits', tone: 'hc-btn-slate' },
+        ].map((item) => {
+          const isActive = tab === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setTab(item.id as AdminTab)}
+              aria-pressed={isActive}
+              className={`hc-btn ${item.tone} w-full h-full min-h-[48px] !rounded-2xl !whitespace-normal text-center leading-snug px-3.5 py-2.5 text-xs font-semibold ${
+                isActive
+                  ? 'ring-2 ring-[#D9A84E] ring-offset-2 ring-offset-[#F4F2EC] -translate-y-0.5 brightness-105'
+                  : 'opacity-95 hover:opacity-100'
+              }`}
+            >
+              {item.label}
+            </button>
+          );
+        })}
       </div>
 
       {feedback && (
@@ -1651,12 +1657,47 @@ export const AdminVerificationPortal: React.FC = () => {
                 12-Verb Separation-of-Duties Role Matrix
               </h3>
               <div className="space-y-2 max-h-72 overflow-y-auto text-xs">
-                {Object.entries(adminData?.rolePermissionMatrix || {}).map(([roleCode, verbs]: [string, any]) => (
-                  <div key={roleCode} className="p-3 rounded-xl bg-white border border-[#102E36]/12">
-                    <div className="font-mono-num font-bold text-[#102E36]">{roleCode}</div>
-                    <div className="text-[#287A59] mt-0.5">{(verbs || []).join(' · ')}</div>
-                  </div>
-                ))}
+                {Object.entries(adminData?.rolePermissionMatrix || {}).map(
+                  ([roleCode, rawEntry]: [string, any]) => {
+                    const verbs = Array.isArray(rawEntry)
+                      ? rawEntry
+                      : Array.from(
+                          new Set(
+                            (Array.isArray(rawEntry?.allowedModules) ? rawEntry.allowedModules : []).flatMap(
+                              (m: any) => (Array.isArray(m?.actions) ? m.actions : [])
+                            )
+                          )
+                        );
+                    const roleLabel =
+                      !Array.isArray(rawEntry) && rawEntry?.roleLabel
+                        ? `${rawEntry.roleLabel} (${roleCode})`
+                        : roleCode;
+                    const isCritical = Boolean(!Array.isArray(rawEntry) && rawEntry?.isCriticalRole);
+                    const boundary =
+                      !Array.isArray(rawEntry) && Array.isArray(rawEntry?.deniedBoundaries)
+                        ? rawEntry.deniedBoundaries[0]
+                        : null;
+
+                    return (
+                      <div key={roleCode} className="p-3 rounded-xl bg-white border border-[#102E36]/12 space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-mono-num font-bold text-[#102E36]">{roleLabel}</span>
+                          {isCritical && (
+                            <span className="text-[11px] font-semibold text-[#9F2D20]">
+                              Critical Dual-Approval
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[#287A59] font-medium">
+                          {verbs.length > 0 ? verbs.join(' · ') : 'View only'}
+                        </div>
+                        {boundary && (
+                          <div className="text-[11px] text-[#4A636A]">{boundary}</div>
+                        )}
+                      </div>
+                    );
+                  }
+                )}
               </div>
             </div>
 

@@ -21,7 +21,6 @@ import {
   Upload,
   Download,
   Square,
-  Globe,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -300,29 +299,6 @@ export const BeneficiaryPortal: React.FC = () => {
       <div className="flex flex-col lg:flex-row gap-6">
         {/* Desktop Sidebar & Mobile Horizontal Nav */}
         <aside className="lg:w-72 shrink-0 space-y-4">
-          <div className="hc-card p-4 bg-[#102E36] text-[#FAF9F6] space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-semibold text-[#D9A84E]">{t.portalTitle}</span>
-              <button
-                type="button"
-                onClick={() => setLang(lang === 'en' ? 'sw' : 'en')}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FAF9F6]/10 text-xs font-semibold hover:bg-[#FAF9F6]/20"
-              >
-                <Globe className="w-3.5 h-3.5 text-[#D9A84E]" />
-                {lang === 'en' ? 'Kiswahili' : 'English'}
-              </button>
-            </div>
-            <div>
-              <div className="text-[11px] text-[#FAF9F6]/70">{t.refLabel}</div>
-              <div className="font-mono-num text-sm font-bold text-[#FAF9F6]">
-                {profile?.referenceCode}
-              </div>
-            </div>
-            <div className="text-xs text-[#FAF9F6]/80">
-              {verificationLabel(profile?.verificationLevel || 'V0')} · {profile?.classification}
-            </div>
-          </div>
-
           <nav className="flex lg:flex-col gap-1.5 overflow-x-auto pb-2 lg:pb-0">
             {navItems.map((item) => (
               <button
