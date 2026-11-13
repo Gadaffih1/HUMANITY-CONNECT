@@ -123,6 +123,8 @@ supporterRouter.get('/portal', async (req: AuthRequest, res) => {
           amountMinor: donations.amountMinor,
           currency: donations.currency,
           status: donations.status,
+          originatedFromAiMatch: donations.originatedFromAiMatch,
+          matchSuggestionId: donations.matchSuggestionId,
           confirmedAt: donations.confirmedAt,
           createdAt: donations.createdAt,
           txId: paymentTransactions.id,
@@ -145,6 +147,8 @@ supporterRouter.get('/portal', async (req: AuthRequest, res) => {
           monthlyAmountMinor: sponsorships.monthlyAmountMinor,
           currency: sponsorships.currency,
           status: sponsorships.status,
+          originatedFromAiMatch: sponsorships.originatedFromAiMatch,
+          matchSuggestionId: sponsorships.matchSuggestionId,
           startedAt: sponsorships.startedAt,
         })
         .from(sponsorships)
@@ -168,6 +172,21 @@ supporterRouter.get('/portal', async (req: AuthRequest, res) => {
         .orderBy(desc(notifications.createdAt)),
     ]);
 
+    const confirmedTotalMinor = myDonations
+      .filter((d) => d.status === 'CONFIRMED')
+      .reduce((acc, d) => acc + d.amountMinor, 0);
+    const aiDonations = myDonations.filter((d) => d.originatedFromAiMatch);
+    const aiConfirmedMinor = aiDonations
+      .filter((d) => d.status === 'CONFIRMED')
+      .reduce((acc, d) => acc + d.amountMinor, 0);
+    const aiPledgedMinor = aiDonations
+      .filter((d) => d.status === 'PLEDGED')
+      .reduce((acc, d) => acc + d.amountMinor, 0);
+    const aiSponsorshipsCount = mySponsorships.filter((s) => s.originatedFromAiMatch).length;
+    const activeAiSponsorshipsCount = mySponsorships.filter(
+      (s) => s.originatedFromAiMatch && s.status === 'ACTIVE'
+    ).length;
+
     res.json({
       supporter,
       savedBeneficiaries: mySaved,
@@ -178,6 +197,22 @@ supporterRouter.get('/portal', async (req: AuthRequest, res) => {
       projects,
       volunteerAssignments: myVolunteering,
       notifications: myNotifications,
+      aiEffectiveness: {
+        aiDonationsCount: aiDonations.length,
+        totalDonationsCount: myDonations.length,
+        aiConfirmedAmountMinor: aiConfirmedMinor,
+        aiPledgedAmountMinor: aiPledgedMinor,
+        totalConfirmedAmountMinor: confirmedTotalMinor,
+        aiShareOfConfirmedPct:
+          confirmedTotalMinor > 0 ? Math.round((aiConfirmedMinor / confirmedTotalMinor) * 100) : 0,
+        aiSponsorshipsCount,
+        activeAiSponsorshipsCount,
+        totalSponsorshipsCount: mySponsorships.length,
+        aiSponsorshipSharePct:
+          mySponsorships.length > 0
+            ? Math.round((aiSponsorshipsCount / mySponsorships.length) * 100)
+            : 0,
+      },
     });
   } catch (err) {
     console.error('Supporter portal error:', err);
@@ -264,6 +299,8 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
       isGiftDonation: z.boolean().default(false),
       giftHonoreeName: z.string().max(120).optional(),
       giftMessage: z.string().max(400).optional(),
+      originatedFromAiMatch: z.boolean().default(false),
+      matchSuggestionId: z.string().uuid().optional(),
     });
 
     const parsed = schema.safeParse(req.body);
@@ -277,6 +314,35 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
     }
     if (d.pathway === 'CENTRAL_FUND' && !d.fundId) {
       return res.status(400).json({ error: 'Central humanitarian fund selection is required.' });
+    }
+
+    const originatedFromAi = Boolean(d.originatedFromAiMatch || d.matchSuggestionId);
+    let resolvedMatchSuggestionId: string | null = null;
+    if (d.matchSuggestionId) {
+      const [validMatch] = await db
+        .select({ id: sponsorshipMatchSuggestions.id })
+        .from(sponsorshipMatchSuggestions)
+        .where(
+          and(
+            eq(sponsorshipMatchSuggestions.id, d.matchSuggestionId),
+            eq(sponsorshipMatchSuggestions.supporterId, supporter.id)
+          )
+        )
+        .limit(1);
+      resolvedMatchSuggestionId = validMatch?.id ?? null;
+    } else if (originatedFromAi && d.beneficiaryId) {
+      const [latestMatch] = await db
+        .select({ id: sponsorshipMatchSuggestions.id })
+        .from(sponsorshipMatchSuggestions)
+        .where(
+          and(
+            eq(sponsorshipMatchSuggestions.supporterId, supporter.id),
+            eq(sponsorshipMatchSuggestions.beneficiaryId, d.beneficiaryId)
+          )
+        )
+        .orderBy(desc(sponsorshipMatchSuggestions.createdAt))
+        .limit(1);
+      resolvedMatchSuggestionId = latestMatch?.id ?? null;
     }
 
     const result = await db.transaction(async (tx) => {
@@ -298,6 +364,8 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
           amountMinor: d.amountMinor,
           currency: d.currency,
           status: isPledge ? 'PLEDGED' : 'PAYMENT_PENDING',
+          originatedFromAiMatch: originatedFromAi,
+          matchSuggestionId: resolvedMatchSuggestionId,
         })
         .returning();
 
@@ -312,6 +380,8 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
             monthlyAmountMinor: d.amountMinor,
             currency: d.currency,
             status: 'PENDING_FIRST_PAYMENT',
+            originatedFromAiMatch: originatedFromAi,
+            matchSuggestionId: resolvedMatchSuggestionId,
           })
           .returning();
         sponsorshipRecord = sp;
@@ -394,7 +464,12 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
       entityType: 'donations',
       entityId: result.donation.id,
       ip: req.ip,
-      details: { pathway: d.pathway, amountMinor: d.amountMinor },
+      details: {
+        pathway: d.pathway,
+        amountMinor: d.amountMinor,
+        originatedFromAiMatch: originatedFromAi,
+        matchSuggestionId: resolvedMatchSuggestionId,
+      },
     });
 
     res.status(201).json(result);

@@ -67,6 +67,7 @@ export const CorporatePortal: React.FC = () => {
 
   // Bulk multi-beneficiary sponsorship state
   const [selectedBeneficiaryIds, setSelectedBeneficiaryIds] = useState<string[]>([]);
+  const [aiBatchBeneficiaryIds, setAiBatchBeneficiaryIds] = useState<string[]>([]);
   const [bulkMonthlyKes, setBulkMonthlyKes] = useState('6000');
   const [bulkMode, setBulkMode] = useState<'MPESA_STK' | 'PLEDGE_ONLY'>('PLEDGE_ONLY');
 
@@ -111,7 +112,7 @@ export const CorporatePortal: React.FC = () => {
       }
       try {
         const matchRes = await apiFetch<MatchingResponsePayload>(
-          '/api/matching/recommendations?refreshAi=false'
+          '/api/matching/suggested?refreshAi=false'
         );
         setProactiveMatches((matchRes.matches || []).slice(0, 3));
       } catch {
@@ -135,10 +136,18 @@ export const CorporatePortal: React.FC = () => {
   const settledTotalMinor = confirmedDonations.reduce((acc: number, d: any) => acc + d.amountMinor, 0);
   const pledgedTotalMinor = pledgedDonations.reduce((acc: number, d: any) => acc + d.amountMinor, 0);
 
-  const toggleBeneficiarySelection = (id: string) => {
-    setSelectedBeneficiaryIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
-    );
+  const toggleBeneficiarySelection = (id: string, fromAiMatch = false) => {
+    setSelectedBeneficiaryIds((prev) => {
+      const exists = prev.includes(id);
+      if (exists) {
+        setAiBatchBeneficiaryIds((aiPrev) => aiPrev.filter((item) => item !== id));
+        return prev.filter((item) => item !== id);
+      }
+      if (fromAiMatch) {
+        setAiBatchBeneficiaryIds((aiPrev) => (aiPrev.includes(id) ? aiPrev : [...aiPrev, id]));
+      }
+      return [...prev, id];
+    });
   };
 
   if (loading) {
@@ -341,7 +350,7 @@ export const CorporatePortal: React.FC = () => {
                         <GlossyButton
                           size="sm"
                           variant={inBatch ? 'green' : 'ivory'}
-                          onClick={() => toggleBeneficiarySelection(m.beneficiaryId)}
+                          onClick={() => toggleBeneficiarySelection(m.beneficiaryId, true)}
                         >
                           {inBatch ? 'In Batch' : '+ Add to Batch'}
                         </GlossyButton>
@@ -382,7 +391,7 @@ export const CorporatePortal: React.FC = () => {
           portalMode="CORPORATE"
           categories={categories}
           batchSelectedIds={selectedBeneficiaryIds}
-          onAddToBatch={(id) => toggleBeneficiarySelection(id)}
+          onAddToBatch={(id) => toggleBeneficiarySelection(id, true)}
           onSponsorMatch={(match, suggestedAmountKes) =>
             setDirectMatchCheckout({
               match,
@@ -735,12 +744,16 @@ export const CorporatePortal: React.FC = () => {
                     method: 'POST',
                     body: JSON.stringify({
                       beneficiaryIds: selectedBeneficiaryIds,
+                      aiMatchedBeneficiaryIds: aiBatchBeneficiaryIds.filter((id) =>
+                        selectedBeneficiaryIds.includes(id)
+                      ),
                       monthlyAmountPerBeneficiaryMinor: Math.round(Number(bulkMonthlyKes || 0) * 100),
                       currency: 'KES',
                       mode: bulkMode,
                     }),
                   });
                   setSelectedBeneficiaryIds([]);
+                  setAiBatchBeneficiaryIds([]);
                   await loadAll();
                   setFeedback(`Initiated ${res.count} institutional sponsorship commitment(s).`);
                 } catch (err: any) {
@@ -776,6 +789,7 @@ export const CorporatePortal: React.FC = () => {
                 <tr>
                   <th className="py-2.5 pr-4">Date</th>
                   <th className="py-2.5 pr-4">Pathway</th>
+                  <th className="py-2.5 pr-4">Origin</th>
                   <th className="py-2.5 pr-4">Type</th>
                   <th className="py-2.5 pr-4">Provider / Receipt</th>
                   <th className="py-2.5 pr-4 text-right">Amount</th>
@@ -789,6 +803,9 @@ export const CorporatePortal: React.FC = () => {
                       {new Date(d.createdAt).toLocaleDateString('en-KE')}
                     </td>
                     <td className="py-3 pr-4">{d.pathway}</td>
+                    <td className="py-3 pr-4 font-semibold text-[#102E36]">
+                      {d.originatedFromAiMatch ? 'AI Match' : 'Direct / CSR'}
+                    </td>
                     <td className="py-3 pr-4">{d.isPledge ? 'Corporate Pledge' : 'Settled Contribution'}</td>
                     <td className="py-3 pr-4 font-mono-num">{d.mpesaReceipt || d.provider || '—'}</td>
                     <td className="py-3 pr-4 text-right font-mono-num font-bold">
@@ -804,54 +821,129 @@ export const CorporatePortal: React.FC = () => {
       )}
 
       {tab === 'impact' && (
-        <div className="hc-card p-6 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-lg font-bold text-[#102E36]">
-                Corporate Impact Report & Gemini Executive Brief
-              </h3>
-              <p className="text-xs text-[#4A636A]">
-                AI-drafted briefs summarise verified totals and require human compliance sign-off before external release.
-              </p>
+        <div className="space-y-6">
+          <div className="hc-card p-6 space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[#287A59]">Automated CSR Engine Attribution</div>
+                <h3 className="text-lg font-bold text-[#102E36]">
+                  Institutional AI Matching Effectiveness
+                </h3>
+              </div>
+              <ExportReportBar
+                title="Institutional AI Matching Impact Breakdown"
+                rows={donations}
+                csvFilename="institutional-ai-matching-impact.csv"
+              />
             </div>
-            <GlossyButton
-              size="sm"
-              variant="gold"
-              disabled={aiBusy}
-              onClick={async () => {
-                setAiBusy(true);
-                try {
-                  const res = await apiFetch<{ output: string }>('/api/ai/assist', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                      mode: 'IMPACT_BRIEF',
-                      text: `Organisation: ${overview?.organisation?.name || user?.fullName}. Verified settled: KES ${(settledTotalMinor / 100).toLocaleString()}. Active sponsorships: ${(overview?.sponsorships || []).length}. Open pledges: KES ${(pledgedTotalMinor / 100).toLocaleString()}.`,
-                      language: 'en',
-                    }),
-                  });
-                  setImpactBrief(res.output);
-                } catch (err: any) {
-                  setErrorMsg(err.message);
-                } finally {
-                  setAiBusy(false);
-                }
-              }}
-            >
-              <Sparkles className="w-4 h-4" />
-              {aiBusy ? 'Drafting...' : 'Draft Board Impact Brief'}
-            </GlossyButton>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">AI-Matched Sponsorships</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#102E36] mt-1">
+                  {overview?.aiEffectiveness?.aiSponsorshipsCount ?? 0}{' '}
+                  <span className="text-xs font-normal text-[#4A636A]">
+                    / {overview?.aiEffectiveness?.totalSponsorshipsCount ?? 0} ({overview?.aiEffectiveness?.aiSponsorshipSharePct ?? 0}%)
+                  </span>
+                </div>
+                <div className="text-xs text-[#287A59] mt-1">
+                  {overview?.aiEffectiveness?.activeAiSponsorshipsCount ?? 0} active institutional links
+                </div>
+              </div>
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">AI-Matched Settled Capital</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#287A59] mt-1">
+                  {formatMoney(overview?.aiEffectiveness?.aiConfirmedAmountMinor ?? 0, 'KES')}
+                </div>
+                <div className="text-xs text-[#4A636A] mt-1 font-mono-num">
+                  {overview?.aiEffectiveness?.aiShareOfConfirmedPct ?? 0}% of settled CSR funds
+                </div>
+              </div>
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">AI-Matched Open Pledges</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#B6721A] mt-1">
+                  {formatMoney(overview?.aiEffectiveness?.aiPledgedAmountMinor ?? 0, 'KES')}
+                </div>
+                <div className="text-xs text-[#4A636A] mt-1">Board-committed pledges via AI</div>
+              </div>
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">AI Contribution Records</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#102E36] mt-1">
+                  {overview?.aiEffectiveness?.aiDonationsCount ?? 0}{' '}
+                  <span className="text-xs font-normal text-[#4A636A]">
+                    / {overview?.aiEffectiveness?.totalDonationsCount ?? 0}
+                  </span>
+                </div>
+                <div className="text-xs text-[#4A636A] mt-1">Tracked with suggestion lineage</div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs text-[#4A636A]">
+                <span>Settled CSR Capital Disbursed via AI Match Recommendations</span>
+                <span className="font-mono-num font-bold text-[#102E36]">
+                  {overview?.aiEffectiveness?.aiShareOfConfirmedPct ?? 0}%
+                </span>
+              </div>
+              <div className="h-2.5 w-full rounded-full bg-[#EAE6DC] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[#287A59]"
+                  style={{ width: `${Math.min(100, overview?.aiEffectiveness?.aiShareOfConfirmedPct ?? 0)}%` }}
+                />
+              </div>
+            </div>
           </div>
-          {impactBrief && (
-            <div className="p-4 rounded-xl bg-white border border-[#102E36]/15 text-sm text-[#102E36] whitespace-pre-wrap leading-relaxed">
-              {impactBrief}
+
+          <div className="hc-card p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold text-[#102E36]">
+                  Corporate Impact Report & Gemini Executive Brief
+                </h3>
+                <p className="text-xs text-[#4A636A]">
+                  AI-drafted briefs summarise verified totals and require human compliance sign-off before external release.
+                </p>
+              </div>
+              <GlossyButton
+                size="sm"
+                variant="gold"
+                disabled={aiBusy}
+                onClick={async () => {
+                  setAiBusy(true);
+                  try {
+                    const aiEff = overview?.aiEffectiveness;
+                    const res = await apiFetch<{ output: string }>('/api/ai/assist', {
+                      method: 'POST',
+                      body: JSON.stringify({
+                        mode: 'IMPACT_BRIEF',
+                        text: `Organisation: ${overview?.organisation?.name || user?.fullName}. Verified settled: KES ${(settledTotalMinor / 100).toLocaleString()}. Active sponsorships: ${(overview?.sponsorships || []).length}. Open pledges: KES ${(pledgedTotalMinor / 100).toLocaleString()}. AI-Matched sponsorships: ${aiEff?.aiSponsorshipsCount ?? 0} (${aiEff?.aiSponsorshipSharePct ?? 0}% of total), AI-matched settled volume: KES ${((aiEff?.aiConfirmedAmountMinor ?? 0) / 100).toLocaleString()} (${aiEff?.aiShareOfConfirmedPct ?? 0}% share).`,
+                        language: 'en',
+                      }),
+                    });
+                    setImpactBrief(res.output);
+                  } catch (err: any) {
+                    setErrorMsg(err.message);
+                  } finally {
+                    setAiBusy(false);
+                  }
+                }}
+              >
+                <Sparkles className="w-4 h-4" />
+                {aiBusy ? 'Drafting...' : 'Draft Board Impact Brief'}
+              </GlossyButton>
             </div>
-          )}
-          <div className="p-4 rounded-xl bg-[#EAE6DC]/50 flex items-center gap-3 text-xs text-[#102E36]">
-            <ShieldCheck className="w-4 h-4 text-[#287A59] shrink-0" />
-            <span>
-              Financial privacy guard active: only your organisation’s authorised officers can export
-              corporate contribution statements.
-            </span>
+            {impactBrief && (
+              <div className="p-4 rounded-xl bg-white border border-[#102E36]/15 text-sm text-[#102E36] whitespace-pre-wrap leading-relaxed">
+                {impactBrief}
+              </div>
+            )}
+            <div className="p-4 rounded-xl bg-[#EAE6DC]/50 flex items-center gap-3 text-xs text-[#102E36]">
+              <ShieldCheck className="w-4 h-4 text-[#287A59] shrink-0" />
+              <span>
+                Financial privacy guard active: only your organisation’s authorised officers can export
+                corporate contribution statements.
+              </span>
+            </div>
           </div>
         </div>
       )}
@@ -1034,6 +1126,8 @@ export const CorporatePortal: React.FC = () => {
                       mode: directMatchCheckout.mode,
                       phoneE164: directMatchCheckout.phone,
                       sponsorshipCoverage: 'PARTIAL',
+                      originatedFromAiMatch: true,
+                      matchSuggestionId: directMatchCheckout.match.suggestionId,
                     }),
                   });
                   if (directMatchCheckout.mode === 'MPESA_STK' && res.paymentTx?.checkoutRequestId) {

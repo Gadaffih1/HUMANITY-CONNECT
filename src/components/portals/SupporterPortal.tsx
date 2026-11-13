@@ -1,8 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
-} from 'recharts';
-import {
   Search,
   HeartHandshake,
   Smartphone,
@@ -14,6 +11,7 @@ import {
   ShieldCheck,
   MessageSquare,
   Sparkles,
+  HelpCircle,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -32,7 +30,7 @@ import {
   type MatchRecommendationItem,
   type MatchingResponsePayload,
 } from '../matching/SponsorshipMatchingPanel';
-import type { ImpactPoint } from '../../lib/impactTimeline';
+import { WhyMatchModal } from '../matching/WhyMatchModal';
 
 type SupporterTab =
   | 'dashboard'
@@ -60,8 +58,6 @@ export const SupporterPortal: React.FC<{
   const [categories, setCategories] = useState<Array<{ code: string; name: string }>>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [impact, setImpact] = useState<ImpactPoint[] | null>(null);
-  const [impactError, setImpactError] = useState<string | null>(null);
 
   // 8 Required Supporter Filters
   const [search, setSearch] = useState('');
@@ -80,6 +76,8 @@ export const SupporterPortal: React.FC<{
     need?: PublicNeedItem;
     fundId?: string;
     fundName?: string;
+    originatedFromAiMatch?: boolean;
+    matchSuggestionId?: string;
   } | null>(
     initialCheckoutTarget
       ? initialCheckoutTarget.fundId
@@ -117,6 +115,7 @@ export const SupporterPortal: React.FC<{
   // Case detail modal
   const [detailCase, setDetailCase] = useState<PublicBeneficiaryCardData | null>(null);
   const [proactiveMatches, setProactiveMatches] = useState<MatchRecommendationItem[]>([]);
+  const [whyMatchTarget, setWhyMatchTarget] = useState<MatchRecommendationItem | null>(null);
 
   const loadAll = async () => {
     try {
@@ -130,7 +129,7 @@ export const SupporterPortal: React.FC<{
       setCategories(ovRes.categories || []);
       try {
         const matchRes = await apiFetch<MatchingResponsePayload>(
-          '/api/matching/recommendations?refreshAi=false'
+          '/api/matching/suggested?refreshAi=false'
         );
         setProactiveMatches((matchRes.matches || []).slice(0, 3));
       } catch {
@@ -143,14 +142,6 @@ export const SupporterPortal: React.FC<{
 
   useEffect(() => {
     loadAll();
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    apiFetch<{ points: ImpactPoint[] }>('/api/supporter/impact-timeline')
-      .then((result) => { if (active) setImpact(result.points); })
-      .catch((err: Error) => { if (active) setImpactError(err.message); });
-    return () => { active = false; };
   }, []);
 
   const openCheckoutFromMatch = (match: MatchRecommendationItem, suggestedAmountKes: number) => {
@@ -176,6 +167,8 @@ export const SupporterPortal: React.FC<{
     setAmountKes(String(suggestedAmountKes));
     setCheckoutTarget({
       pathway: 'DIRECT_SPONSORSHIP',
+      originatedFromAiMatch: true,
+      matchSuggestionId: match.suggestionId,
       beneficiary:
         publicBen ||
         ({
@@ -325,37 +318,6 @@ export const SupporterPortal: React.FC<{
             </div>
           </div>
 
-          <div className="hc-card p-6 space-y-3">
-            <h3 className="text-lg font-bold text-[#102E36]">Impact Over Time</h3>
-            <p className="text-xs text-[#4A636A]">
-              Platform-wide KES totals, not individual contributions. Disbursements are recorded as
-              settled by the application, not independently confirmed transfers. Targets are current
-              amounts for currently approved needs, grouped by their latest approval month; past
-              target changes are not retained. Totals may include seeded demonstration records.
-            </p>
-            {impactError ? (
-              <p role="alert" className="text-sm text-[#9F2D20]">{impactError}</p>
-            ) : impact === null ? (
-              <p className="text-sm text-[#4A636A]">Loading impact data...</p>
-            ) : impact.length === 0 ? (
-              <p className="text-sm text-[#4A636A]">No approved KES targets or settled KES disbursements yet.</p>
-            ) : (
-              <div className="w-full h-72" aria-label="Cumulative recorded disbursements and funding targets in Kenyan shillings">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={impact} accessibilityLayer margin={{ top: 10, right: 20, bottom: 0, left: 10 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="month" />
-                    <YAxis tickFormatter={(value: number) => `KES ${(value / 100).toLocaleString('en-KE')}`} width={100} />
-                    <Tooltip formatter={(value) => formatMoney(Number(value), 'KES')} />
-                    <Legend />
-                    <Area type="stepAfter" dataKey="targetMinor" name="Funding targets" stroke="#B6721A" fill="#D9A84E" fillOpacity={0.18} />
-                    <Area type="stepAfter" dataKey="disbursedMinor" name="Recorded settled disbursements" stroke="#287A59" fill="#287A59" fillOpacity={0.3} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </div>
-
           {/* Proactive AI Match Suggestions on Supporter Dashboard */}
           <div className="hc-card p-6 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -391,7 +353,17 @@ export const SupporterPortal: React.FC<{
                           {m.compositeScore}% Match
                         </span>
                       </div>
-                      <div className="text-sm font-bold text-[#102E36]">{m.displayAlias}</div>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm font-bold text-[#102E36]">{m.displayAlias}</div>
+                        <button
+                          type="button"
+                          onClick={() => setWhyMatchTarget(m)}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#287A59] hover:underline shrink-0"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5" />
+                          Why this match?
+                        </button>
+                      </div>
                       <div className="text-xs text-[#4A636A] line-clamp-2">{m.geminiRationale}</div>
                     </div>
                     <GlossyButton
@@ -578,6 +550,7 @@ export const SupporterPortal: React.FC<{
                 <tr>
                   <th className="py-2.5 pr-4">Date</th>
                   <th className="py-2.5 pr-4">Pathway</th>
+                  <th className="py-2.5 pr-4">Origin</th>
                   <th className="py-2.5 pr-4">Type</th>
                   <th className="py-2.5 pr-4">M-Pesa Receipt</th>
                   <th className="py-2.5 pr-4 text-right">Amount</th>
@@ -591,6 +564,9 @@ export const SupporterPortal: React.FC<{
                       {new Date(d.createdAt).toLocaleDateString('en-KE')}
                     </td>
                     <td className="py-3 pr-4">{d.pathway}</td>
+                    <td className="py-3 pr-4 font-semibold text-[#102E36]">
+                      {d.originatedFromAiMatch ? 'AI Match' : 'Direct'}
+                    </td>
                     <td className="py-3 pr-4">{d.isPledge ? 'Pledge (Unsettled)' : d.sponsorshipCoverage}</td>
                     <td className="py-3 pr-4 font-mono-num">{d.mpesaReceiptNumber || '—'}</td>
                     <td className="py-3 pr-4 text-right font-mono-num font-bold">
@@ -775,20 +751,100 @@ export const SupporterPortal: React.FC<{
       )}
 
       {tab === 'impact' && (
-        <div className="hc-card p-6 space-y-4">
-          <div className="flex items-center gap-2">
-            <FileCheck2 className="w-5 h-5 text-[#287A59]" />
-            <h3 className="text-lg font-bold text-[#102E36]">Verified Impact & Accountability Summary</h3>
+        <div className="space-y-6">
+          <div className="hc-card p-6 space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-[#D9A84E]" />
+                <h3 className="text-lg font-bold text-[#102E36]">
+                  AI Matching Engine Effectiveness (Automated Attribution)
+                </h3>
+              </div>
+              <span className="text-xs font-mono-num text-[#4A636A]">
+                {portal?.aiEffectiveness?.aiDonationsCount ?? 0} of{' '}
+                {portal?.aiEffectiveness?.totalDonationsCount ?? 0} contributions via AI Match
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">AI-Matched Sponsorships</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#102E36] mt-1">
+                  {portal?.aiEffectiveness?.aiSponsorshipsCount ?? 0}{' '}
+                  <span className="text-xs font-normal text-[#4A636A]">
+                    / {portal?.aiEffectiveness?.totalSponsorshipsCount ?? 0} ({portal?.aiEffectiveness?.aiSponsorshipSharePct ?? 0}%)
+                  </span>
+                </div>
+                <div className="text-xs text-[#287A59] mt-1">
+                  {portal?.aiEffectiveness?.activeAiSponsorshipsCount ?? 0} active verified
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">AI-Matched Settled Funding</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#287A59] mt-1">
+                  {formatMoney(portal?.aiEffectiveness?.aiConfirmedAmountMinor ?? 0, 'KES')}
+                </div>
+                <div className="text-xs text-[#4A636A] mt-1 font-mono-num">
+                  {portal?.aiEffectiveness?.aiShareOfConfirmedPct ?? 0}% of settled total
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">AI-Matched Pledges</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#B6721A] mt-1">
+                  {formatMoney(portal?.aiEffectiveness?.aiPledgedAmountMinor ?? 0, 'KES')}
+                </div>
+                <div className="text-xs text-[#4A636A] mt-1">Tracked separately until settled</div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                <div className="text-xs text-[#4A636A]">Direct / Manual Settled</div>
+                <div className="text-xl font-extrabold font-mono-num text-[#102E36] mt-1">
+                  {formatMoney(
+                    Math.max(
+                      0,
+                      (portal?.aiEffectiveness?.totalConfirmedAmountMinor ?? 0) -
+                        (portal?.aiEffectiveness?.aiConfirmedAmountMinor ?? 0)
+                    ),
+                    'KES'
+                  )}
+                </div>
+                <div className="text-xs text-[#4A636A] mt-1">Non-AI browse or central funds</div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs text-[#4A636A]">
+                <span>Settled Impact Capital Share Originating from AI Match Suggestions</span>
+                <span className="font-mono-num font-bold text-[#102E36]">
+                  {portal?.aiEffectiveness?.aiShareOfConfirmedPct ?? 0}%
+                </span>
+              </div>
+              <div className="h-2.5 w-full rounded-full bg-[#EAE6DC] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[#287A59]"
+                  style={{ width: `${Math.min(100, portal?.aiEffectiveness?.aiShareOfConfirmedPct ?? 0)}%` }}
+                />
+              </div>
+            </div>
           </div>
-          <p className="text-sm text-[#4A636A]">
-            100% of verified contributions enter ring-fenced trust accounts separate from platform revenue.
-            Download your verified CSV ledger or printable PDF statement anytime.
-          </p>
-          <ExportReportBar
-            title="Humanity Connect Supporter Impact Report"
-            rows={confirmedDonations}
-            csvFilename="humanity-connect-impact-statement.csv"
-          />
+
+          <div className="hc-card p-6 space-y-4">
+            <div className="flex items-center gap-2">
+              <FileCheck2 className="w-5 h-5 text-[#287A59]" />
+              <h3 className="text-lg font-bold text-[#102E36]">Verified Impact & Accountability Summary</h3>
+            </div>
+            <p className="text-sm text-[#4A636A]">
+              100% of verified contributions enter ring-fenced trust accounts separate from platform revenue.
+              Download your verified CSV ledger (including AI Match origin flags) or printable PDF statement anytime.
+            </p>
+            <ExportReportBar
+              title="Humanity Connect Supporter Impact Report"
+              rows={confirmedDonations}
+              csvFilename="humanity-connect-impact-statement.csv"
+            />
+          </div>
         </div>
       )}
 
@@ -979,6 +1035,8 @@ export const SupporterPortal: React.FC<{
                       supporterConsentGranted: consentSigned,
                       isGiftDonation: isGift,
                       giftHonoreeName: giftHonoree,
+                      originatedFromAiMatch: checkoutTarget.originatedFromAiMatch ?? false,
+                      matchSuggestionId: checkoutTarget.matchSuggestionId,
                     }),
                   });
                   if (payMode === 'MPESA_STK' && res.paymentTx?.checkoutRequestId) {
@@ -1056,6 +1114,20 @@ export const SupporterPortal: React.FC<{
           </div>
         )}
       </ModalDialog>
+
+      <WhyMatchModal
+        open={Boolean(whyMatchTarget)}
+        beneficiaryId={whyMatchTarget?.beneficiaryId || null}
+        beneficiaryAlias={whyMatchTarget?.displayAlias}
+        county={whyMatchTarget?.county}
+        compositeScore={whyMatchTarget?.compositeScore}
+        onClose={() => setWhyMatchTarget(null)}
+        onSponsor={() => {
+          if (whyMatchTarget) {
+            openCheckoutFromMatch(whyMatchTarget, 5000);
+          }
+        }}
+      />
     </div>
   );
 };

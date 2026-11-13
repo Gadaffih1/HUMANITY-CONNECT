@@ -10,6 +10,7 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 // 1. Users
@@ -489,6 +490,11 @@ export const donations = pgTable(
     amountMinor: integer('amount_minor').notNull(),
     currency: text('currency').notNull().default('KES'),
     status: text('status').notNull().default('PLEDGED'), // PLEDGED | PAYMENT_PENDING | CONFIRMED | FAILED | CANCELLED
+    originatedFromAiMatch: boolean('originated_from_ai_match').notNull().default(false),
+    matchSuggestionId: uuid('match_suggestion_id').references(
+      (): AnyPgColumn => sponsorshipMatchSuggestions.id,
+      { onDelete: 'set null' }
+    ),
     notes: text('notes'),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
@@ -591,6 +597,11 @@ export const sponsorships = pgTable(
     monthlyAmountMinor: integer('monthly_amount_minor').notNull(),
     currency: text('currency').notNull().default('KES'),
     status: text('status').notNull().default('PENDING_FIRST_PAYMENT'), // PENDING_FIRST_PAYMENT | ACTIVE | PAUSED | COMPLETED
+    originatedFromAiMatch: boolean('originated_from_ai_match').notNull().default(false),
+    matchSuggestionId: uuid('match_suggestion_id').references(
+      (): AnyPgColumn => sponsorshipMatchSuggestions.id,
+      { onDelete: 'set null' }
+    ),
     startedAt: timestamp('started_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },

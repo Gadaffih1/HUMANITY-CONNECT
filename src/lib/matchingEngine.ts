@@ -133,6 +133,7 @@ const PRIORITY_FACTOR: Record<string, number> = {
 };
 
 export interface EvaluatedMatchItem {
+  rank?: number;
   suggestionId?: string;
   beneficiaryId: string;
   referenceCode: string;
@@ -184,12 +185,21 @@ export async function runDynamicSponsorshipMatching(params: {
   actorRole: string;
   ip?: string;
   refreshAi?: boolean;
+  limit?: number;
+  preferenceOverride?: {
+    budgetMinor?: number;
+    interestCategories?: string[];
+    locationFocus?: string[];
+    preferredAgeGroups?: string[];
+  };
 }): Promise<{
   config: Awaited<ReturnType<typeof getOrCreateMatchingConfig>>;
   preferences: typeof sponsorMatchingPreferences.$inferSelect;
   matches: EvaluatedMatchItem[];
+  totalCandidatesEvaluated: number;
   aiUsed: boolean;
   aiStatusNote: string;
+  generatedAt: string;
 }> {
   const config = await getOrCreateMatchingConfig();
 
@@ -261,8 +271,10 @@ export async function runDynamicSponsorshipMatching(params: {
       config,
       preferences,
       matches: [],
+      totalCandidatesEvaluated: 0,
       aiUsed: false,
       aiStatusNote: 'No verified, safeguarding-cleared beneficiary profiles currently open for matching.',
+      generatedAt: new Date().toISOString(),
     };
   }
 
@@ -326,10 +338,26 @@ export async function runDynamicSponsorshipMatching(params: {
       .map((s) => s.beneficiaryId)
   );
 
+  const effectiveBudgetMinor = params.preferenceOverride?.budgetMinor ?? preferences.budgetMinor;
+  const effectiveInterests =
+    params.preferenceOverride?.interestCategories &&
+    params.preferenceOverride.interestCategories.length > 0
+      ? params.preferenceOverride.interestCategories
+      : preferences.interestCategories || [];
+  const effectiveLocations =
+    params.preferenceOverride?.locationFocus && params.preferenceOverride.locationFocus.length > 0
+      ? params.preferenceOverride.locationFocus
+      : preferences.locationFocus || ['ALL'];
+  const effectiveAgeGroups =
+    params.preferenceOverride?.preferredAgeGroups &&
+    params.preferenceOverride.preferredAgeGroups.length > 0
+      ? params.preferenceOverride.preferredAgeGroups
+      : preferences.preferredAgeGroups || ['ALL'];
+
   const weights = config.normalizedWeights;
-  const interests = new Set((preferences.interestCategories || []).map((c) => c.toUpperCase()));
-  const locFocus = (preferences.locationFocus || ['ALL']).map((l) => l.toLowerCase());
-  const ageFocus = preferences.preferredAgeGroups || ['ALL'];
+  const interests = new Set(effectiveInterests.map((c) => c.toUpperCase()));
+  const locFocus = effectiveLocations.map((l) => l.toLowerCase());
+  const ageFocus = effectiveAgeGroups;
   const classFocus = new Set(preferences.preferredClassifications || []);
 
   const evaluated: EvaluatedMatchItem[] = [];
@@ -382,7 +410,7 @@ export async function runDynamicSponsorshipMatching(params: {
     const remainingGapMinor = primaryNeed
       ? Math.max(0, primaryNeed.targetAmountMinor - primaryNeed.fulfilledAmountMinor)
       : bp.monthlyNeedTargetMinor;
-    const budget = Math.max(10000, preferences.budgetMinor);
+    const budget = Math.max(10000, effectiveBudgetMinor);
     let budgetRatio = 0.35;
     if (remainingGapMinor > 0 && budget >= remainingGapMinor) {
       budgetRatio = 1.0;
@@ -497,8 +525,12 @@ export async function runDynamicSponsorshipMatching(params: {
     });
   }
 
+  const maxMatches = Math.max(1, Math.min(20, params.limit ?? 6));
   evaluated.sort((a, b) => b.compositeScore - a.compositeScore);
-  const topCandidates = evaluated.slice(0, 6);
+  const topCandidates = evaluated.slice(0, maxMatches);
+  topCandidates.forEach((item, idx) => {
+    item.rank = idx + 1;
+  });
 
   // 6. Gemini AI Contextual Profile & Preference Analysis
   let aiUsed = false;
@@ -514,11 +546,11 @@ export async function runDynamicSponsorshipMatching(params: {
           sponsor: {
             entityType: preferences.sponsorEntityType,
             organisationType: orgDetails?.orgType || null,
-            budgetKes: Math.round(preferences.budgetMinor / 100),
+            budgetKes: Math.round(effectiveBudgetMinor / 100),
             cadence: preferences.preferredCadence,
-            interestCategories: preferences.interestCategories,
-            locationFocus: preferences.locationFocus,
-            preferredAgeGroups: preferences.preferredAgeGroups,
+            interestCategories: effectiveInterests,
+            locationFocus: effectiveLocations,
+            preferredAgeGroups: effectiveAgeGroups,
             impactGoal: preferences.impactGoal,
           },
           candidates: topCandidates.map((c) => ({
@@ -601,6 +633,9 @@ ${JSON.stringify(promptPayload)}`,
         }
 
         topCandidates.sort((a, b) => b.compositeScore - a.compositeScore);
+        topCandidates.forEach((item, idx) => {
+          item.rank = idx + 1;
+        });
         aiUsed = true;
         aiStatusNote = 'Gemini AI contextual analysis (gemini-4-hydrogen) applied to verified profiles.';
 
@@ -672,7 +707,256 @@ ${JSON.stringify(promptPayload)}`,
     config,
     preferences,
     matches: topCandidates,
+    totalCandidatesEvaluated: candidates.length,
     aiUsed,
     aiStatusNote,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+export async function explainSponsorshipMatchWithGemini(params: {
+  supporterId: string;
+  beneficiaryId: string;
+  actorUserId: string;
+  actorRole: string;
+  ip?: string;
+}): Promise<{
+  beneficiaryId: string;
+  beneficiaryAlias: string;
+  referenceCode: string;
+  county: string;
+  algorithmName: string;
+  compositeScore: number;
+  summary: string;
+  keyReasons: string[];
+  usedModel: string;
+  aiGenerated: boolean;
+  breakdown: {
+    needScore: number;
+    locationScore: number;
+    budgetScore: number;
+    urgencyScore: number;
+    ageScore: number;
+    geminiDelta: number;
+    weights: NormalizedWeights;
+  };
+  transparencyNotes: string;
+}> {
+  const config = await getOrCreateMatchingConfig();
+
+  const [supporter] = await db
+    .select()
+    .from(supporterProfiles)
+    .where(eq(supporterProfiles.id, params.supporterId))
+    .limit(1);
+  if (!supporter) {
+    throw new Error('Supporter profile not found.');
+  }
+
+  const preferences = await getOrCreateSponsorPreferences(
+    supporter.id,
+    supporter.supporterType,
+    Boolean(supporter.organisationId)
+  );
+
+  const [bp] = await db
+    .select({
+      id: beneficiaryProfiles.id,
+      referenceCode: beneficiaryProfiles.referenceCode,
+      displayAlias: beneficiaryProfiles.displayAlias,
+      county: beneficiaryProfiles.county,
+      classification: beneficiaryProfiles.classification,
+      ageGroup: beneficiaryProfiles.ageGroup,
+      isMinorCase: beneficiaryProfiles.isMinorCase,
+      specificChallenges: beneficiaryProfiles.specificChallenges,
+      vulnerabilitySummary: beneficiaryProfiles.vulnerabilitySummary,
+      monthlyNeedTargetMinor: beneficiaryProfiles.monthlyNeedTargetMinor,
+      currency: beneficiaryProfiles.currency,
+      verificationStatus: beneficiaryProfiles.verificationStatus,
+      safeguardingCleared: beneficiaryProfiles.safeguardingCleared,
+      publicListingApproved: beneficiaryProfiles.publicListingApproved,
+    })
+    .from(beneficiaryProfiles)
+    .where(eq(beneficiaryProfiles.id, params.beneficiaryId))
+    .limit(1);
+
+  if (!bp || (config.requireHumanSafeguardGate && (!bp.safeguardingCleared || bp.verificationStatus !== 'VERIFIED'))) {
+    throw new Error('Verified beneficiary profile not found.');
+  }
+
+  const [primaryNeed] = await db
+    .select({
+      id: needRequests.id,
+      title: needRequests.title,
+      categoryCode: needsCategories.code,
+      categoryName: needsCategories.name,
+      priorityTier: needRequests.priorityTier,
+      targetAmountMinor: needRequests.targetAmountMinor,
+      fulfilledAmountMinor: needRequests.fulfilledAmountMinor,
+      currency: needRequests.currency,
+      isRecurring: needRequests.isRecurring,
+      frequency: needRequests.frequency,
+    })
+    .from(needRequests)
+    .innerJoin(needsCategories, eq(needRequests.categoryId, needsCategories.id))
+    .leftJoin(priorityAssessments, eq(priorityAssessments.needRequestId, needRequests.id))
+    .where(
+      and(
+        eq(needRequests.beneficiaryId, bp.id),
+        eq(needRequests.verificationStatus, 'HUMAN_APPROVED')
+      )
+    )
+    .orderBy(desc(priorityAssessments.compositePriority))
+    .limit(1);
+
+  const [existingSuggestion] = await db
+    .select()
+    .from(sponsorshipMatchSuggestions)
+    .where(
+      and(
+        eq(sponsorshipMatchSuggestions.supporterId, supporter.id),
+        eq(sponsorshipMatchSuggestions.beneficiaryId, bp.id)
+      )
+    )
+    .orderBy(desc(sponsorshipMatchSuggestions.createdAt))
+    .limit(1);
+
+  const weights = config.normalizedWeights;
+  const fallbackBreakdown = {
+    needScore: existingSuggestion?.breakdownJson?.needScore ?? Math.round(weights.need * 0.8),
+    locationScore: existingSuggestion?.breakdownJson?.locationScore ?? Math.round(weights.location * 0.8),
+    budgetScore: existingSuggestion?.breakdownJson?.budgetScore ?? Math.round(weights.budget * 0.8),
+    urgencyScore: existingSuggestion?.breakdownJson?.urgencyScore ?? Math.round(weights.urgency * 0.8),
+    ageScore: existingSuggestion?.breakdownJson?.ageScore ?? Math.round(weights.age * 0.8),
+    geminiDelta: existingSuggestion?.breakdownJson?.geminiDelta ?? 0,
+    weights,
+  };
+  const compositeScore =
+    existingSuggestion?.compositeScore ??
+    Math.min(
+      100,
+      fallbackBreakdown.needScore +
+        fallbackBreakdown.locationScore +
+        fallbackBreakdown.budgetScore +
+        fallbackBreakdown.urgencyScore +
+        fallbackBreakdown.ageScore +
+        fallbackBreakdown.geminiDelta
+    );
+
+  const remainingGapKes = primaryNeed
+    ? Math.max(0, Math.round((primaryNeed.targetAmountMinor - primaryNeed.fulfilledAmountMinor) / 100))
+    : Math.round(bp.monthlyNeedTargetMinor / 100);
+
+  let summary =
+    existingSuggestion?.geminiRationale ||
+    `${bp.displayAlias} in ${bp.county} County scored ${compositeScore}% under the ${config.algorithmName} weights because its verified ${primaryNeed?.categoryName || 'household'} need aligns with your interest focus and KES ${Math.round(preferences.budgetMinor / 100).toLocaleString()} budget.`;
+  let keyReasons: string[] = [
+    `Need alignment (${fallbackBreakdown.needScore}/${weights.need} pts): ${primaryNeed?.categoryName || 'Verified household support'}`,
+    `Location & urgency (${fallbackBreakdown.locationScore + fallbackBreakdown.urgencyScore}/${weights.location + weights.urgency} pts): ${bp.county} County · ${(primaryNeed?.priorityTier || 'P3_HIGH').replace('_', ' ')}`,
+    `Budget & demographic fit (${fallbackBreakdown.budgetScore + fallbackBreakdown.ageScore}/${weights.budget + weights.age} pts): KES ${remainingGapKes.toLocaleString()} remaining gap`,
+  ];
+  let usedModel = existingSuggestion?.usedModel || 'deterministic-weighted-v1';
+  let aiGenerated = false;
+
+  const ai = getAiClient();
+  if (ai) {
+    try {
+      const explainPayload = {
+        algorithmName: config.algorithmName,
+        weightsPct: weights,
+        compositeScore,
+        breakdown: fallbackBreakdown,
+        sponsorPreferences: {
+          entityType: preferences.sponsorEntityType,
+          budgetKes: Math.round(preferences.budgetMinor / 100),
+          cadence: preferences.preferredCadence,
+          interestCategories: preferences.interestCategories,
+          locationFocus: preferences.locationFocus,
+          preferredAgeGroups: preferences.preferredAgeGroups,
+          impactGoal: preferences.impactGoal,
+        },
+        beneficiaryProfile: {
+          referenceCode: bp.referenceCode,
+          displayAlias: bp.displayAlias,
+          county: bp.county,
+          classification: bp.classification,
+          ageGroup: bp.ageGroup,
+          isMinorCase: bp.isMinorCase,
+          specificChallenges: bp.specificChallenges,
+          primaryNeedTitle: primaryNeed?.title || 'Verified Household Need',
+          primaryNeedCategory: primaryNeed?.categoryName || 'Household Support',
+          priorityTier: primaryNeed?.priorityTier || 'P3_HIGH',
+          remainingGapKes,
+        },
+      };
+
+      const aiResp = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: `You are explaining the matching logic inside HUMANITY CONNECT to a supporter who clicked "Why this match?".
+SAFEGUARD RULES:
+- Never expose or invent personal names, phone numbers, IDs, or street addresses.
+- Write a concise, transparent 2-sentence plain-English summary of how the sponsor preferences and weighted algorithm rules connected this V4-verified beneficiary profile.
+- Provide 3 short bullet reasons referencing concrete score drivers (need category, county, budget, urgency, or age group).
+
+Input JSON:
+${JSON.stringify(explainPayload)}`,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              keyReasons: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+            },
+            required: ['summary', 'keyReasons'],
+          },
+        },
+      });
+
+      const parsed = JSON.parse((aiResp.text ?? '{}').trim()) as {
+        summary?: string;
+        keyReasons?: string[];
+      };
+
+      if (parsed.summary && parsed.summary.trim().length > 10) {
+        summary = parsed.summary.trim();
+        usedModel = 'gemini-4-hydrogen';
+        aiGenerated = true;
+      }
+      if (Array.isArray(parsed.keyReasons) && parsed.keyReasons.length > 0) {
+        keyReasons = parsed.keyReasons.slice(0, 4).map((r) => String(r));
+      }
+
+      await writeAuditLog({
+        actorUserId: params.actorUserId,
+        actorRole: params.actorRole,
+        action: 'AI_MATCH_EXPLANATION_VIEWED',
+        entityType: 'beneficiary_profiles',
+        entityId: bp.id,
+        ip: params.ip,
+        details: { model: usedModel, compositeScore },
+      });
+    } catch (err: any) {
+      console.warn('Gemini why-match explanation fallback:', err?.message || err);
+    }
+  }
+
+  return {
+    beneficiaryId: bp.id,
+    beneficiaryAlias: bp.displayAlias,
+    referenceCode: bp.referenceCode,
+    county: bp.county,
+    algorithmName: config.algorithmName,
+    compositeScore,
+    summary,
+    keyReasons,
+    usedModel,
+    aiGenerated,
+    breakdown: fallbackBreakdown,
+    transparencyNotes: config.transparencyNotes,
   };
 }

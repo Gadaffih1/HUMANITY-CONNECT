@@ -329,8 +329,18 @@ export const SponsorshipCard: React.FC<{
   monthlyAmountMinor: number;
   currency: string;
   status: string;
+  originatedFromAiMatch?: boolean;
   startedAt?: string | null;
-}> = ({ beneficiaryAlias, beneficiaryRef, county, monthlyAmountMinor, currency, status, startedAt }) => {
+}> = ({
+  beneficiaryAlias,
+  beneficiaryRef,
+  county,
+  monthlyAmountMinor,
+  currency,
+  status,
+  originatedFromAiMatch,
+  startedAt,
+}) => {
   const active = status === 'ACTIVE';
   return (
     <div className="hc-card p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -343,6 +353,12 @@ export const SponsorshipCard: React.FC<{
           <span className={`font-semibold ${active ? 'text-[#287A59]' : 'text-[#B6721A]'}`}>
             {active ? 'Verified Active Sponsorship' : 'Awaiting Verified First Payment'}
           </span>
+          {originatedFromAiMatch && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="font-semibold text-[#102E36]">AI Matched</span>
+            </>
+          )}
         </div>
         <h4 className="text-base font-bold text-[#102E36]">{beneficiaryAlias}</h4>
         {startedAt && (

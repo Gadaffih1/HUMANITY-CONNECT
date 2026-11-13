@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Sliders, Sparkles, ShieldCheck, Save, RefreshCw } from 'lucide-react';
+import { Sliders, Sparkles, ShieldCheck, Save, RefreshCw, BarChart3 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { GlossyButton } from '../ui/DesignSystem';
+import { GlossyButton, ExportReportBar, formatMoney } from '../ui/DesignSystem';
 
 interface AdminMatchingOverview {
   config: {
@@ -54,6 +54,21 @@ interface AdminMatchingOverview {
     avgScore: number;
     sponsoredCount: number;
     savedCount: number;
+  };
+  effectiveness: {
+    totalDonationsCount: number;
+    aiDonationsCount: number;
+    aiDonationSharePct: number;
+    totalConfirmedAmountMinor: number;
+    aiConfirmedAmountMinor: number;
+    aiPledgedAmountMinor: number;
+    aiShareOfConfirmedPct: number;
+    totalSponsorshipsCount: number;
+    aiSponsorshipsCount: number;
+    activeAiSponsorshipsCount: number;
+    aiSponsorshipSharePct: number;
+    suggestionConversionRatePct: number;
+    avgConvertedScore: number;
   };
 }
 
@@ -187,6 +202,114 @@ export const AdminMatchingGovernancePanel: React.FC = () => {
           <div className="text-xs text-[#4A636A] mt-1">Active sponsor bookmarks</div>
         </div>
       </div>
+
+      {/* Automated AI Matching Effectiveness & Impact Report */}
+      {overview?.effectiveness && (
+        <div className="hc-card p-6 space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-[#287A59] flex items-center gap-1.5">
+                <BarChart3 className="w-3.5 h-3.5" />
+                Automated Impact Dashboard Attribution
+              </div>
+              <h3 className="text-lg font-bold text-[#102E36]">
+                AI Matching Engine Effectiveness & Conversion Report
+              </h3>
+              <p className="text-xs text-[#4A636A]">
+                Automatically computed from <code>donations.originated_from_ai_match</code> and{' '}
+                <code>sponsorships.originated_from_ai_match</code> ledger records.
+              </p>
+            </div>
+            <ExportReportBar
+              title="Humanity Connect AI Matching Effectiveness Report"
+              rows={[
+                {
+                  metric_period: 'All-Time Platform Ledger',
+                  total_suggestions: overview.stats.totalSuggestions,
+                  suggestion_conversion_rate_pct: overview.effectiveness.suggestionConversionRatePct,
+                  avg_suggestion_score_pct: overview.stats.avgScore,
+                  avg_converted_score_pct: overview.effectiveness.avgConvertedScore,
+                  ai_sponsorships: overview.effectiveness.aiSponsorshipsCount,
+                  active_ai_sponsorships: overview.effectiveness.activeAiSponsorshipsCount,
+                  total_sponsorships: overview.effectiveness.totalSponsorshipsCount,
+                  ai_sponsorship_share_pct: overview.effectiveness.aiSponsorshipSharePct,
+                  ai_donations_count: overview.effectiveness.aiDonationsCount,
+                  total_donations_count: overview.effectiveness.totalDonationsCount,
+                  ai_confirmed_kes: Math.round(overview.effectiveness.aiConfirmedAmountMinor / 100),
+                  total_confirmed_kes: Math.round(overview.effectiveness.totalConfirmedAmountMinor / 100),
+                  ai_confirmed_capital_share_pct: overview.effectiveness.aiShareOfConfirmedPct,
+                  ai_pledged_kes: Math.round(overview.effectiveness.aiPledgedAmountMinor / 100),
+                },
+              ]}
+              csvFilename="ai-matching-effectiveness-report.csv"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+              <div className="text-xs text-[#4A636A]">AI-Originated Sponsorship Share</div>
+              <div className="text-xl font-extrabold font-mono-num text-[#102E36] mt-1">
+                {overview.effectiveness.aiSponsorshipsCount}{' '}
+                <span className="text-xs font-normal text-[#4A636A]">
+                  / {overview.effectiveness.totalSponsorshipsCount} ({overview.effectiveness.aiSponsorshipSharePct}%)
+                </span>
+              </div>
+              <div className="text-xs text-[#287A59] mt-1">
+                {overview.effectiveness.activeAiSponsorshipsCount} active AI-matched commitments
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+              <div className="text-xs text-[#4A636A]">Settled Capital via AI Matches</div>
+              <div className="text-xl font-extrabold font-mono-num text-[#287A59] mt-1">
+                {formatMoney(overview.effectiveness.aiConfirmedAmountMinor, 'KES')}
+              </div>
+              <div className="text-xs text-[#4A636A] mt-1 font-mono-num">
+                {overview.effectiveness.aiShareOfConfirmedPct}% of{' '}
+                {formatMoney(overview.effectiveness.totalConfirmedAmountMinor, 'KES')} total settled
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+              <div className="text-xs text-[#4A636A]">Suggestion-to-Sponsorship Rate</div>
+              <div className="text-xl font-extrabold font-mono-num text-[#102E36] mt-1">
+                {overview.effectiveness.suggestionConversionRatePct}%
+              </div>
+              <div className="text-xs text-[#4A636A] mt-1 font-mono-num">
+                Avg converted score: {overview.effectiveness.avgConvertedScore}% vs {overview.stats.avgScore}% overall
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+              <div className="text-xs text-[#4A636A]">AI-Matched Donations & Pledges</div>
+              <div className="text-xl font-extrabold font-mono-num text-[#B6721A] mt-1">
+                {overview.effectiveness.aiDonationsCount}{' '}
+                <span className="text-xs font-normal text-[#4A636A]">
+                  / {overview.effectiveness.totalDonationsCount} ({overview.effectiveness.aiDonationSharePct}%)
+                </span>
+              </div>
+              <div className="text-xs text-[#4A636A] mt-1 font-mono-num">
+                Open pledges: {formatMoney(overview.effectiveness.aiPledgedAmountMinor, 'KES')}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs text-[#4A636A]">
+              <span>Platform Settled Capital Originating from AI Match Engine vs Direct / Manual Giving</span>
+              <span className="font-mono-num font-bold text-[#102E36]">
+                {overview.effectiveness.aiShareOfConfirmedPct}% AI-Matched
+              </span>
+            </div>
+            <div className="h-2.5 w-full rounded-full bg-[#EAE6DC] overflow-hidden">
+              <div
+                className="h-full rounded-full bg-[#287A59]"
+                style={{ width: `${Math.min(100, overview.effectiveness.aiShareOfConfirmedPct)}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {feedback && (
         <div className="p-3.5 rounded-xl bg-[#287A59]/10 border border-[#287A59]/25 text-sm text-[#287A59]">

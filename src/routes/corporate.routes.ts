@@ -72,6 +72,8 @@ corporateRouter.get('/overview', async (req: AuthRequest, res) => {
               currency: donations.currency,
               isPledge: donations.isPledge,
               status: donations.status,
+              originatedFromAiMatch: donations.originatedFromAiMatch,
+              matchSuggestionId: donations.matchSuggestionId,
               confirmedAt: donations.confirmedAt,
               createdAt: donations.createdAt,
               mpesaReceipt: paymentTransactions.mpesaReceiptNumber,
@@ -95,6 +97,8 @@ corporateRouter.get('/overview', async (req: AuthRequest, res) => {
               monthlyAmountMinor: sponsorships.monthlyAmountMinor,
               currency: sponsorships.currency,
               status: sponsorships.status,
+              originatedFromAiMatch: sponsorships.originatedFromAiMatch,
+              matchSuggestionId: sponsorships.matchSuggestionId,
             })
             .from(sponsorships)
             .innerJoin(beneficiaryProfiles, eq(sponsorships.beneficiaryId, beneficiaryProfiles.id))
@@ -103,6 +107,21 @@ corporateRouter.get('/overview', async (req: AuthRequest, res) => {
 
     const campaigns = await db.select().from(communityProjects);
     const centralFunds = await db.select().from(humanitarianFunds);
+
+    const confirmedTotalMinor = orgDonations
+      .filter((d) => d.status === 'CONFIRMED')
+      .reduce((acc, d) => acc + d.amountMinor, 0);
+    const aiDonations = orgDonations.filter((d) => d.originatedFromAiMatch);
+    const aiConfirmedMinor = aiDonations
+      .filter((d) => d.status === 'CONFIRMED')
+      .reduce((acc, d) => acc + d.amountMinor, 0);
+    const aiPledgedMinor = aiDonations
+      .filter((d) => d.status === 'PLEDGED')
+      .reduce((acc, d) => acc + d.amountMinor, 0);
+    const aiSponsorshipsCount = orgSponsorships.filter((s) => s.originatedFromAiMatch).length;
+    const activeAiSponsorshipsCount = orgSponsorships.filter(
+      (s) => s.originatedFromAiMatch && s.status === 'ACTIVE'
+    ).length;
 
     res.json({
       supporter: supporter || null,
@@ -113,6 +132,22 @@ corporateRouter.get('/overview', async (req: AuthRequest, res) => {
       campaigns,
       donations: orgDonations,
       sponsorships: orgSponsorships,
+      aiEffectiveness: {
+        aiDonationsCount: aiDonations.length,
+        totalDonationsCount: orgDonations.length,
+        aiConfirmedAmountMinor: aiConfirmedMinor,
+        aiPledgedAmountMinor: aiPledgedMinor,
+        totalConfirmedAmountMinor: confirmedTotalMinor,
+        aiShareOfConfirmedPct:
+          confirmedTotalMinor > 0 ? Math.round((aiConfirmedMinor / confirmedTotalMinor) * 100) : 0,
+        aiSponsorshipsCount,
+        activeAiSponsorshipsCount,
+        totalSponsorshipsCount: orgSponsorships.length,
+        aiSponsorshipSharePct:
+          orgSponsorships.length > 0
+            ? Math.round((aiSponsorshipsCount / orgSponsorships.length) * 100)
+            : 0,
+      },
     });
   } catch (err) {
     console.error('Corporate overview error:', err);
@@ -225,6 +260,7 @@ corporateRouter.post('/bulk-sponsor', async (req: AuthRequest, res) => {
   try {
     const schema = z.object({
       beneficiaryIds: z.array(z.string().uuid()).min(1).max(20),
+      aiMatchedBeneficiaryIds: z.array(z.string().uuid()).optional(),
       monthlyAmountPerBeneficiaryMinor: z.number().int().positive(),
       currency: z.string().default('KES'),
       mode: z.enum(['PLEDGE_ONLY', 'MPESA_STK']),
@@ -239,9 +275,37 @@ corporateRouter.post('/bulk-sponsor', async (req: AuthRequest, res) => {
       .limit(1);
     if (!supporter) return res.status(400).json({ error: 'Supporter profile required.' });
 
+    const aiMatchedSet = new Set(parsed.data.aiMatchedBeneficiaryIds || []);
+    const existingSuggestions =
+      aiMatchedSet.size > 0
+        ? await db
+            .select({
+              id: sponsorshipMatchSuggestions.id,
+              beneficiaryId: sponsorshipMatchSuggestions.beneficiaryId,
+            })
+            .from(sponsorshipMatchSuggestions)
+            .where(
+              and(
+                eq(sponsorshipMatchSuggestions.supporterId, supporter.id),
+                inArray(sponsorshipMatchSuggestions.beneficiaryId, Array.from(aiMatchedSet))
+              )
+            )
+            .orderBy(desc(sponsorshipMatchSuggestions.createdAt))
+        : [];
+
+    const suggestionByBenId = new Map<string, string>();
+    for (const s of existingSuggestions) {
+      if (!suggestionByBenId.has(s.beneficiaryId)) {
+        suggestionByBenId.set(s.beneficiaryId, s.id);
+      }
+    }
+
     const created = await db.transaction(async (tx) => {
       const results = [];
       for (const bId of parsed.data.beneficiaryIds) {
+        const originatedFromAi = aiMatchedSet.has(bId);
+        const matchSuggestionId = originatedFromAi ? suggestionByBenId.get(bId) ?? null : null;
+
         const [sp] = await tx
           .insert(sponsorships)
           .values({
@@ -250,6 +314,8 @@ corporateRouter.post('/bulk-sponsor', async (req: AuthRequest, res) => {
             monthlyAmountMinor: parsed.data.monthlyAmountPerBeneficiaryMinor,
             currency: parsed.data.currency,
             status: 'PENDING_FIRST_PAYMENT',
+            originatedFromAiMatch: originatedFromAi,
+            matchSuggestionId,
           })
           .returning();
 
@@ -264,6 +330,8 @@ corporateRouter.post('/bulk-sponsor', async (req: AuthRequest, res) => {
             amountMinor: parsed.data.monthlyAmountPerBeneficiaryMinor,
             currency: parsed.data.currency,
             status: parsed.data.mode === 'PLEDGE_ONLY' ? 'PLEDGED' : 'PAYMENT_PENDING',
+            originatedFromAiMatch: originatedFromAi,
+            matchSuggestionId,
           })
           .returning();
 

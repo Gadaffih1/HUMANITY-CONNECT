@@ -9,6 +9,8 @@ import {
   sponsorMatchingPreferences,
   sponsorshipMatchSuggestions,
   beneficiaryProfiles,
+  donations,
+  sponsorships,
 } from '../db/schema.ts';
 import {
   requireAuth,
@@ -22,6 +24,7 @@ import {
   getOrCreateSponsorPreferences,
   normalizeWeights,
   runDynamicSponsorshipMatching,
+  explainSponsorshipMatchWithGemini,
 } from '../lib/matchingEngine.ts';
 
 export const matchingRouter = Router();
@@ -47,22 +50,101 @@ async function ensureSupporterForUser(userId: string, fullName: string, activeRo
   return created;
 }
 
-// GET /api/matching/recommendations — Proactive AI-powered sponsorship matches for Supportive & Corporate portals
-matchingRouter.get('/recommendations', async (req: AuthRequest, res) => {
+async function handleSuggestedMatches(req: AuthRequest) {
+  const supporter = await ensureSupporterForUser(
+    req.authUser!.userId,
+    req.authUser!.fullName,
+    req.authUser!.activeRole
+  );
+  const refreshAi = req.query.refreshAi !== 'false';
+  const rawLimit = req.query.limit ? Number(req.query.limit) : undefined;
+  const limit =
+    rawLimit !== undefined && Number.isFinite(rawLimit) && rawLimit > 0
+      ? Math.min(20, Math.floor(rawLimit))
+      : undefined;
+
+  const parseCsv = (val: unknown): string[] | undefined => {
+    if (typeof val !== 'string' || !val.trim()) return undefined;
+    const parts = val
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return parts.length > 0 ? parts : undefined;
+  };
+
+  const budgetKesRaw = req.query.budgetKes ? Number(req.query.budgetKes) : undefined;
+  const budgetMinor =
+    budgetKesRaw !== undefined && Number.isFinite(budgetKesRaw) && budgetKesRaw >= 100
+      ? Math.round(budgetKesRaw * 100)
+      : undefined;
+
+  const interestCategories = parseCsv(req.query.category);
+  const locationFocus = parseCsv(req.query.county);
+  const preferredAgeGroups = parseCsv(req.query.ageGroup);
+
+  const hasOverride = Boolean(
+    budgetMinor !== undefined || interestCategories || locationFocus || preferredAgeGroups
+  );
+
+  return runDynamicSponsorshipMatching({
+    supporterId: supporter.id,
+    actorUserId: req.authUser!.userId,
+    actorRole: req.authUser!.activeRole,
+    ip: req.ip,
+    refreshAi,
+    limit,
+    preferenceOverride: hasOverride
+      ? {
+          budgetMinor,
+          interestCategories,
+          locationFocus,
+          preferredAgeGroups,
+        }
+      : undefined,
+  });
+}
+
+// GET /api/matching/suggested — Gemini-driven ranked sponsorship match engine endpoint
+matchingRouter.get('/suggested', async (req: AuthRequest, res) => {
+  try {
+    const result = await handleSuggestedMatches(req);
+    res.json(result);
+  } catch (err: any) {
+    console.error('Matching suggested error:', err);
+    res.status(500).json({ error: err.message || 'Unable to generate suggested sponsorship matches.' });
+  }
+});
+
+// GET /api/matching/suggested/:beneficiaryId/why — Brief Gemini-generated summary of matching logic
+matchingRouter.get('/suggested/:beneficiaryId/why', async (req: AuthRequest, res) => {
   try {
     const supporter = await ensureSupporterForUser(
       req.authUser!.userId,
       req.authUser!.fullName,
       req.authUser!.activeRole
     );
-    const refreshAi = req.query.refreshAi !== 'false';
-    const result = await runDynamicSponsorshipMatching({
+    const beneficiaryId = String(req.params.beneficiaryId || '').trim();
+    if (!beneficiaryId) {
+      return res.status(400).json({ error: 'Valid beneficiary ID is required.' });
+    }
+    const explanation = await explainSponsorshipMatchWithGemini({
       supporterId: supporter.id,
+      beneficiaryId,
       actorUserId: req.authUser!.userId,
       actorRole: req.authUser!.activeRole,
       ip: req.ip,
-      refreshAi,
     });
+    res.json(explanation);
+  } catch (err: any) {
+    console.error('Matching explanation error:', err);
+    res.status(404).json({ error: err.message || 'Unable to generate match explanation.' });
+  }
+});
+
+// GET /api/matching/recommendations — Alias for Supportive & Corporate portals
+matchingRouter.get('/recommendations', async (req: AuthRequest, res) => {
+  try {
+    const result = await handleSuggestedMatches(req);
     res.json(result);
   } catch (err: any) {
     console.error('Matching recommendations error:', err);
@@ -249,14 +331,65 @@ matchingRouter.get(
         .orderBy(desc(sponsorshipMatchSuggestions.createdAt))
         .limit(40);
 
-      const [{ totalSuggestions, avgScore, sponsoredCount, savedCount }] = await db
+      const [{ totalSuggestions, avgScore, sponsoredCount, savedCount, avgConvertedScore }] = await db
         .select({
           totalSuggestions: sql<number>`count(*)::int`,
           avgScore: sql<number>`coalesce(round(avg(${sponsorshipMatchSuggestions.compositeScore})), 0)::int`,
           sponsoredCount: sql<number>`count(*) filter (where ${sponsorshipMatchSuggestions.status} = 'SPONSORED')::int`,
           savedCount: sql<number>`count(*) filter (where ${sponsorshipMatchSuggestions.status} = 'SAVED')::int`,
+          avgConvertedScore: sql<number>`coalesce(round(avg(${sponsorshipMatchSuggestions.compositeScore}) filter (where ${sponsorshipMatchSuggestions.status} = 'SPONSORED')), 0)::int`,
         })
         .from(sponsorshipMatchSuggestions);
+
+      const [donationAgg] = await db
+        .select({
+          totalDonationsCount: sql<number>`count(*)::int`,
+          aiDonationsCount: sql<number>`count(*) filter (where ${donations.originatedFromAiMatch} = true)::int`,
+          totalConfirmedAmountMinor: sql<number>`coalesce(sum(${donations.amountMinor}) filter (where ${donations.status} = 'CONFIRMED'), 0)::int`,
+          aiConfirmedAmountMinor: sql<number>`coalesce(sum(${donations.amountMinor}) filter (where ${donations.originatedFromAiMatch} = true and ${donations.status} = 'CONFIRMED'), 0)::int`,
+          aiPledgedAmountMinor: sql<number>`coalesce(sum(${donations.amountMinor}) filter (where ${donations.originatedFromAiMatch} = true and ${donations.status} = 'PLEDGED'), 0)::int`,
+        })
+        .from(donations);
+
+      const [sponsorshipAgg] = await db
+        .select({
+          totalSponsorshipsCount: sql<number>`count(*)::int`,
+          aiSponsorshipsCount: sql<number>`count(*) filter (where ${sponsorships.originatedFromAiMatch} = true)::int`,
+          activeAiSponsorshipsCount: sql<number>`count(*) filter (where ${sponsorships.originatedFromAiMatch} = true and ${sponsorships.status} = 'ACTIVE')::int`,
+        })
+        .from(sponsorships);
+
+      const effectiveness = {
+        totalDonationsCount: donationAgg?.totalDonationsCount ?? 0,
+        aiDonationsCount: donationAgg?.aiDonationsCount ?? 0,
+        aiDonationSharePct:
+          (donationAgg?.totalDonationsCount ?? 0) > 0
+            ? Math.round(((donationAgg?.aiDonationsCount ?? 0) / donationAgg!.totalDonationsCount) * 100)
+            : 0,
+        totalConfirmedAmountMinor: donationAgg?.totalConfirmedAmountMinor ?? 0,
+        aiConfirmedAmountMinor: donationAgg?.aiConfirmedAmountMinor ?? 0,
+        aiPledgedAmountMinor: donationAgg?.aiPledgedAmountMinor ?? 0,
+        aiShareOfConfirmedPct:
+          (donationAgg?.totalConfirmedAmountMinor ?? 0) > 0
+            ? Math.round(
+                ((donationAgg?.aiConfirmedAmountMinor ?? 0) / donationAgg!.totalConfirmedAmountMinor) *
+                  100
+              )
+            : 0,
+        totalSponsorshipsCount: sponsorshipAgg?.totalSponsorshipsCount ?? 0,
+        aiSponsorshipsCount: sponsorshipAgg?.aiSponsorshipsCount ?? 0,
+        activeAiSponsorshipsCount: sponsorshipAgg?.activeAiSponsorshipsCount ?? 0,
+        aiSponsorshipSharePct:
+          (sponsorshipAgg?.totalSponsorshipsCount ?? 0) > 0
+            ? Math.round(
+                ((sponsorshipAgg?.aiSponsorshipsCount ?? 0) / sponsorshipAgg!.totalSponsorshipsCount) *
+                  100
+              )
+            : 0,
+        suggestionConversionRatePct:
+          totalSuggestions > 0 ? Math.round((sponsoredCount / totalSuggestions) * 100) : 0,
+        avgConvertedScore,
+      };
 
       res.json({
         config,
@@ -267,6 +400,7 @@ matchingRouter.get(
           sponsoredCount,
           savedCount,
         },
+        effectiveness,
       });
     } catch (err) {
       console.error('Admin matching overview error:', err);

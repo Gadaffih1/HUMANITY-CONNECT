@@ -9,9 +9,11 @@ import {
   CheckCircle2,
   ShieldCheck,
   Info,
+  HelpCircle,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { GlossyButton, formatMoney, priorityLabel } from '../ui/DesignSystem';
+import { WhyMatchModal } from './WhyMatchModal';
 
 export interface MatchBreakdown {
   needScore: number;
@@ -31,6 +33,7 @@ export interface MatchBreakdown {
 }
 
 export interface MatchRecommendationItem {
+  rank?: number;
   suggestionId?: string;
   beneficiaryId: string;
   referenceCode: string;
@@ -96,8 +99,10 @@ export interface MatchingResponsePayload {
     proactiveOptIn: boolean;
   };
   matches: MatchRecommendationItem[];
+  totalCandidatesEvaluated?: number;
   aiUsed: boolean;
   aiStatusNote: string;
+  generatedAt?: string;
 }
 
 const AGE_GROUP_OPTIONS = [
@@ -137,6 +142,10 @@ export const SponsorshipMatchingPanel: React.FC<{
   const [running, setRunning] = useState(false);
   const [showPrefs, setShowPrefs] = useState(false);
   const [expandedBreakdownId, setExpandedBreakdownId] = useState<string | null>(null);
+  const [whyMatchTarget, setWhyMatchTarget] = useState<{
+    match: MatchRecommendationItem;
+    suggestedAmountKes: number;
+  } | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -176,7 +185,7 @@ export const SponsorshipMatchingPanel: React.FC<{
     else setRunning(true);
     try {
       const res = await apiFetch<MatchingResponsePayload>(
-        `/api/matching/recommendations?refreshAi=${refreshAi ? 'true' : 'false'}`
+        `/api/matching/suggested?refreshAi=${refreshAi ? 'true' : 'false'}`
       );
       hydrateFromPayload(res);
     } catch (err: any) {
@@ -568,12 +577,22 @@ export const SponsorshipMatchingPanel: React.FC<{
                         <span aria-hidden="true">·</span>
                         <span>{formatAgeGroupLabel(match.ageGroup)}</span>
                       </div>
-                      <h4 className="text-lg font-extrabold text-[#102E36]">
-                        {match.displayAlias}
-                      </h4>
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <h4 className="text-lg font-extrabold text-[#102E36]">
+                          {match.displayAlias}
+                        </h4>
+                        <button
+                          type="button"
+                          onClick={() => setWhyMatchTarget({ match, suggestedAmountKes })}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#287A59] hover:underline"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5" />
+                          Why this match?
+                        </button>
+                      </div>
                       <div className="text-xs font-semibold text-[#287A59]">
                         {match.primaryNeed
-                          ? `${match.primaryNeed.categoryName} · ${priorityLabel(match.primaryNeed.priorityTier)}`
+                          ? `${match.primaryNeed.categoryName} · ${priorityLabel(match.primaryNeed.priorityTier).label}`
                           : match.classification.replace(/_/g, ' ')}
                         {match.status === 'SPONSORED' ? ' · Actively Sponsored' : ''}
                       </div>
@@ -784,6 +803,20 @@ export const SponsorshipMatchingPanel: React.FC<{
           })}
         </div>
       )}
+
+      <WhyMatchModal
+        open={Boolean(whyMatchTarget)}
+        beneficiaryId={whyMatchTarget?.match.beneficiaryId || null}
+        beneficiaryAlias={whyMatchTarget?.match.displayAlias}
+        county={whyMatchTarget?.match.county}
+        compositeScore={whyMatchTarget?.match.compositeScore}
+        onClose={() => setWhyMatchTarget(null)}
+        onSponsor={() => {
+          if (whyMatchTarget) {
+            onSponsorMatch(whyMatchTarget.match, whyMatchTarget.suggestedAmountKes);
+          }
+        }}
+      />
     </div>
   );
 };
