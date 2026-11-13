@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
+} from 'recharts';
+import {
   Search,
   HeartHandshake,
   Smartphone,
@@ -29,6 +32,7 @@ import {
   type MatchRecommendationItem,
   type MatchingResponsePayload,
 } from '../matching/SponsorshipMatchingPanel';
+import type { ImpactPoint } from '../../lib/impactTimeline';
 
 type SupporterTab =
   | 'dashboard'
@@ -56,6 +60,8 @@ export const SupporterPortal: React.FC<{
   const [categories, setCategories] = useState<Array<{ code: string; name: string }>>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [impact, setImpact] = useState<ImpactPoint[] | null>(null);
+  const [impactError, setImpactError] = useState<string | null>(null);
 
   // 8 Required Supporter Filters
   const [search, setSearch] = useState('');
@@ -137,6 +143,14 @@ export const SupporterPortal: React.FC<{
 
   useEffect(() => {
     loadAll();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    apiFetch<{ points: ImpactPoint[] }>('/api/supporter/impact-timeline')
+      .then((result) => { if (active) setImpact(result.points); })
+      .catch((err: Error) => { if (active) setImpactError(err.message); });
+    return () => { active = false; };
   }, []);
 
   const openCheckoutFromMatch = (match: MatchRecommendationItem, suggestedAmountKes: number) => {
@@ -309,6 +323,37 @@ export const SupporterPortal: React.FC<{
                 {(portal?.recurringSchedules || []).filter((r: any) => r.status === 'ACTIVE').length}
               </div>
             </div>
+          </div>
+
+          <div className="hc-card p-6 space-y-3">
+            <h3 className="text-lg font-bold text-[#102E36]">Impact Over Time</h3>
+            <p className="text-xs text-[#4A636A]">
+              Platform-wide KES totals, not individual contributions. Disbursements are recorded as
+              settled by the application, not independently confirmed transfers. Targets are current
+              amounts for currently approved needs, grouped by their latest approval month; past
+              target changes are not retained. Totals may include seeded demonstration records.
+            </p>
+            {impactError ? (
+              <p role="alert" className="text-sm text-[#9F2D20]">{impactError}</p>
+            ) : impact === null ? (
+              <p className="text-sm text-[#4A636A]">Loading impact data...</p>
+            ) : impact.length === 0 ? (
+              <p className="text-sm text-[#4A636A]">No approved KES targets or settled KES disbursements yet.</p>
+            ) : (
+              <div className="w-full h-72" aria-label="Cumulative recorded disbursements and funding targets in Kenyan shillings">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={impact} accessibilityLayer margin={{ top: 10, right: 20, bottom: 0, left: 10 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="month" />
+                    <YAxis tickFormatter={(value: number) => `KES ${(value / 100).toLocaleString('en-KE')}`} width={100} />
+                    <Tooltip formatter={(value) => formatMoney(Number(value), 'KES')} />
+                    <Legend />
+                    <Area type="stepAfter" dataKey="targetMinor" name="Funding targets" stroke="#B6721A" fill="#D9A84E" fillOpacity={0.18} />
+                    <Area type="stepAfter" dataKey="disbursedMinor" name="Recorded settled disbursements" stroke="#287A59" fill="#287A59" fillOpacity={0.3} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
           </div>
 
           {/* Proactive AI Match Suggestions on Supporter Dashboard */}

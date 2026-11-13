@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, isNotNull, lte } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   supporterProfiles,
@@ -17,12 +17,46 @@ import {
   volunteerAssignments,
   notifications,
   sponsorshipMatchSuggestions,
+  disbursements,
 } from '../db/schema.ts';
 import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 import { sha256Hex } from '../lib/crypto.ts';
+import { buildImpactTimeline } from '../lib/impactTimeline.ts';
 
 export const supporterRouter = Router();
 supporterRouter.use(requireAuth);
+
+supporterRouter.get('/impact-timeline', async (_req: AuthRequest, res) => {
+  try {
+    const now = new Date();
+    const disbursementMonth = sql<string>`to_char(${disbursements.disbursedAt} AT TIME ZONE 'UTC', 'YYYY-MM')`;
+    const targetMonth = sql<string>`to_char(${needRequests.humanApprovedAt} AT TIME ZONE 'UTC', 'YYYY-MM')`;
+    const [settled, targets] = await Promise.all([
+      db.select({
+        month: disbursementMonth,
+        amountMinor: sql<string>`sum(${disbursements.amountMinor})::text`,
+      }).from(disbursements).where(and(
+        eq(disbursements.status, 'SETTLED'),
+        eq(disbursements.currency, 'KES'),
+        isNotNull(disbursements.disbursedAt),
+        lte(disbursements.disbursedAt, now),
+      )).groupBy(disbursementMonth),
+      db.select({
+        month: targetMonth,
+        amountMinor: sql<string>`sum(${needRequests.targetAmountMinor})::text`,
+      }).from(needRequests).where(and(
+        eq(needRequests.verificationStatus, 'HUMAN_APPROVED'),
+        eq(needRequests.currency, 'KES'),
+        isNotNull(needRequests.humanApprovedAt),
+        lte(needRequests.humanApprovedAt, now),
+      )).groupBy(targetMonth),
+    ]);
+    res.json({ currency: 'KES', points: buildImpactTimeline(settled, targets, now.toISOString().slice(0, 7)) });
+  } catch (err) {
+    console.error('Impact timeline error:', err);
+    res.status(500).json({ error: 'Unable to load impact timeline.' });
+  }
+});
 
 async function getOrCreateSupporterProfile(userId: string, fullName: string, activeRole: string) {
   const [existing] = await db
