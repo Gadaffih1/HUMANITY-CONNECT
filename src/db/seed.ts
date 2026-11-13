@@ -17,6 +17,7 @@ import {
   consentRecords,
   organisations,
   empowermentMilestones,
+  matchingEngineConfig,
 } from './schema.ts';
 import { encryptSensitiveText, hashPassword } from '../lib/crypto.ts';
 
@@ -234,6 +235,26 @@ async function runSeed(): Promise<void> {
     await db.insert(needsCategories).values(c).onConflictDoNothing({ target: needsCategories.code });
   }
 
+  // 3b. Default Transparent Matching Engine Configuration
+  await db
+    .insert(matchingEngineConfig)
+    .values({
+      configKey: 'DEFAULT',
+      algorithmName: 'Humanity Connect Dynamic Impact Matcher',
+      weightNeedAlignment: 30,
+      weightLocationFocus: 20,
+      weightBudgetFit: 20,
+      weightUrgencyImpact: 20,
+      weightAgeDemographics: 10,
+      prioritiseUnderfundedPct: 60,
+      minThresholdScore: 35,
+      enableGeminiAnalysis: true,
+      requireHumanSafeguardGate: true,
+      transparencyNotes:
+        'Scores combine deterministic weighted criteria (Need 30%, Location 20%, Budget 20%, Urgency & Gap 20%, Age & Challenges 10%) with bounded Gemini AI contextual analysis. Only V4-verified, safeguarding-cleared cases are eligible.',
+    })
+    .onConflictDoNothing({ target: matchingEngineConfig.configKey });
+
   // 4. Organisations, Central Humanitarian Funds & Community Projects
   const existingFunds = await db.select().from(humanitarianFunds).limit(1);
   if (existingFunds.length === 0) {
@@ -383,6 +404,12 @@ async function runSeed(): Promise<void> {
         ward: 'Viwandani',
         isMinorCase: true,
         guardianOrgName: 'Naivasha Child Welfare Office',
+        ageGroup: 'CHILDREN_5_17',
+        specificChallenges: [
+          'Double bereavement / orphaned siblings',
+          'Secondary & primary tuition continuity',
+          'School lunch nutrition support',
+        ],
         vulnerabilitySummary:
           'Verified grandmother and aunt caring for three orphaned school-going children following bereavement. Minor identities protected via guardian proxy.',
         monthlyNeedTargetMinor: 850000,
@@ -411,6 +438,12 @@ async function runSeed(): Promise<void> {
         ward: 'Kondele',
         isMinorCase: false,
         guardianOrgName: null,
+        ageGroup: 'ADULT_26_59',
+        specificChallenges: [
+          'Single-parent flood displacement recovery',
+          'Micro-enterprise equipment gap',
+          'Transitional household rent stability',
+        ],
         vulnerabilitySummary:
           'Single mother of two recovering from flood displacement; enrolled in the Kisumu Women Tailoring Cooperative empowerment pathway.',
         monthlyNeedTargetMinor: 650000,
@@ -439,6 +472,12 @@ async function runSeed(): Promise<void> {
         ward: 'Ganda',
         isMinorCase: false,
         guardianOrgName: null,
+        ageGroup: 'ELDERLY_60_PLUS',
+        specificChallenges: [
+          'Elderly caregiver household with 2 dependents',
+          'Coastal flood structural roof damage',
+          'Clean drinking water & dry ration shortage',
+        ],
         vulnerabilitySummary:
           'Elderly household recovering after severe coastal flooding damaged mud-walled shelter and clean water storage.',
         monthlyNeedTargetMinor: 750000,
@@ -498,6 +537,8 @@ async function runSeed(): Promise<void> {
           publicListingApproved: true,
           monthlyNeedTargetMinor: item.monthlyNeedTargetMinor,
           currency: 'KES',
+          ageGroup: item.ageGroup,
+          specificChallenges: item.specificChallenges,
         })
         .returning();
 
@@ -601,6 +642,50 @@ async function runSeed(): Promise<void> {
         completionPct: item.classification === 'NEEDY' ? 65 : 40,
         microGrantStatus: item.classification === 'NEEDY' ? 'APPROVED_PHASE_1' : 'ELIGIBLE_IN_TRAINING',
       });
+    }
+  } else {
+    // Ensure existing showcase beneficiaries retain ageGroup and specificChallenges metadata
+    const metadataPatches: Array<{
+      ref: string;
+      ageGroup: string;
+      challenges: string[];
+    }> = [
+      {
+        ref: 'HC-KE-2026-0104',
+        ageGroup: 'CHILDREN_5_17',
+        challenges: [
+          'Double bereavement / orphaned siblings',
+          'Secondary & primary tuition continuity',
+          'School lunch nutrition support',
+        ],
+      },
+      {
+        ref: 'HC-KE-2026-0112',
+        ageGroup: 'ADULT_26_59',
+        challenges: [
+          'Single-parent flood displacement recovery',
+          'Micro-enterprise equipment gap',
+          'Transitional household rent stability',
+        ],
+      },
+      {
+        ref: 'HC-KE-2026-0119',
+        ageGroup: 'ELDERLY_60_PLUS',
+        challenges: [
+          'Elderly caregiver household with 2 dependents',
+          'Coastal flood structural roof damage',
+          'Clean drinking water & dry ration shortage',
+        ],
+      },
+    ];
+    for (const patch of metadataPatches) {
+      await db
+        .update(beneficiaryProfiles)
+        .set({
+          ageGroup: patch.ageGroup,
+          specificChallenges: patch.challenges,
+        })
+        .where(eq(beneficiaryProfiles.referenceCode, patch.ref));
     }
   }
 }

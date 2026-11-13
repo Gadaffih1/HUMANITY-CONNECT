@@ -1,6 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
-function getAiClient(): GoogleGenAI | null {
+export function getAiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
   return new GoogleGenAI({
@@ -80,7 +80,7 @@ export async function assistHumanitarianText(params: {
 
   if (params.mode === 'NEED_TRIAGE_ADVISORY' || params.mode === 'NEED_CATEGORISATION') {
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-4-hydrogen',
       contents: `Analyze this humanitarian need request in Kenya for ADVISORY officer assistance ONLY.
 SAFEGUARD RULE: Never make final eligibility, financial, or child protection decisions. Never recommend auto-rejection.
 Context: ${params.context || 'Kenyan household support intake'}
@@ -124,7 +124,7 @@ Need narrative: ${redactedText}`,
       advisoryCategory: parsed.advisoryCategory || 'Family welfare',
       advisoryReasons: parsed.reasons || [],
       requiresHumanReview: true,
-      usedModel: 'gemini-3.8-flash',
+      usedModel: 'gemini-4-hydrogen',
     };
   }
 
@@ -150,7 +150,7 @@ Need narrative: ${redactedText}`,
   };
 
   const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
+    model: 'gemini-4-hydrogen',
     contents: `${params.context ? `Context: ${params.context}\n\n` : ''}${redactedText}`,
     config: {
       systemInstruction: instructions[params.mode] || instructions.GENERAL_ASSIST,
@@ -160,6 +160,6 @@ Need narrative: ${redactedText}`,
   return {
     output: (response.text ?? '').trim(),
     requiresHumanReview: true,
-    usedModel: 'gemini-3.8-flash',
+    usedModel: 'gemini-4-hydrogen',
   };
 }

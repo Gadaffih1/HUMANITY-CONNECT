@@ -19,9 +19,15 @@ import {
   formatMoney,
   type PublicBeneficiaryCardData,
 } from '../ui/DesignSystem';
+import {
+  SponsorshipMatchingPanel,
+  type MatchRecommendationItem,
+  type MatchingResponsePayload,
+} from '../matching/SponsorshipMatchingPanel';
 
 type CorporateTab =
   | 'dashboard'
+  | 'matching'
   | 'organisation'
   | 'csr-programmes'
   | 'bulk-sponsor'
@@ -71,18 +77,28 @@ export const CorporatePortal: React.FC = () => {
   const [fundPhone, setFundPhone] = useState(user?.phoneE164 || '+254712345678');
   const [pendingStk, setPendingStk] = useState<{ checkoutRequestId: string; amountMinor: number } | null>(null);
 
-  // AI Impact brief
+  // AI Impact brief & Dynamic Sponsorship Matching
   const [impactBrief, setImpactBrief] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
+  const [categories, setCategories] = useState<Array<{ code: string; name: string }>>([]);
+  const [proactiveMatches, setProactiveMatches] = useState<MatchRecommendationItem[]>([]);
+  const [directMatchCheckout, setDirectMatchCheckout] = useState<{
+    match: MatchRecommendationItem;
+    amountKes: string;
+    mode: 'MPESA_STK' | 'PLEDGE_ONLY';
+    phone: string;
+  } | null>(null);
 
   const loadAll = async () => {
     try {
-      const [ov, ben] = await Promise.all([
+      const [ov, ben, pubOv] = await Promise.all([
         apiFetch<any>('/api/corporate/overview'),
         fetch('/api/public/beneficiaries').then((r) => r.json()),
+        fetch('/api/public/overview').then((r) => r.json()),
       ]);
       setOverview(ov);
       setPublicCases(ben.beneficiaries || []);
+      setCategories(pubOv.categories || []);
       if (ov?.centralFunds?.[0] && !campaignFundId) {
         setCampaignFundId(ov.centralFunds[0].id);
       }
@@ -92,6 +108,14 @@ export const CorporatePortal: React.FC = () => {
         setOrgCounty(ov.organisation.county);
         setOrgEmail(ov.organisation.contactEmail);
         setRegNumber(ov.organisation.registrationNumber || '');
+      }
+      try {
+        const matchRes = await apiFetch<MatchingResponsePayload>(
+          '/api/matching/recommendations?refreshAi=false'
+        );
+        setProactiveMatches((matchRes.matches || []).slice(0, 3));
+      } catch {
+        // Non-blocking background proactive preview
       }
     } catch (err: any) {
       setErrorMsg(err.message);
@@ -155,9 +179,10 @@ export const CorporatePortal: React.FC = () => {
       <div className="flex flex-wrap gap-2 p-1.5 rounded-2xl bg-[#EAE6DC]/70 overflow-x-auto">
         {[
           { id: 'dashboard', label: 'Corporate Dashboard' },
+          { id: 'matching', label: 'AI Sponsorship Matching' },
           { id: 'organisation', label: 'Organisation & Team' },
           { id: 'csr-programmes', label: 'CSR Budgets & Campaigns' },
-          { id: 'bulk-sponsor', label: 'Multi-Beneficiary Sponsorship' },
+          { id: 'bulk-sponsor', label: `Multi-Beneficiary Sponsorship (${selectedBeneficiaryIds.length})` },
           { id: 'statements', label: 'Donation & Financial Reports' },
           { id: 'impact', label: 'Impact Reports' },
         ].map((item) => (
@@ -264,7 +289,110 @@ export const CorporatePortal: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Proactive AI Institutional Match Strip */}
+          <div className="hc-card p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[#287A59] flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-[#D9A84E]" />
+                  Proactive Institutional CSR Matching
+                </div>
+                <h3 className="text-lg font-bold text-[#102E36]">
+                  Recommended Verified Households & Cohorts
+                </h3>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {selectedBeneficiaryIds.length > 0 && (
+                  <GlossyButton size="sm" variant="gold" onClick={() => setTab('bulk-sponsor')}>
+                    Review Batch ({selectedBeneficiaryIds.length})
+                  </GlossyButton>
+                )}
+                <GlossyButton size="sm" variant="teal" onClick={() => setTab('matching')}>
+                  Open AI Matching Engine
+                </GlossyButton>
+              </div>
+            </div>
+
+            {proactiveMatches.length === 0 ? (
+              <div className="text-xs text-[#4A636A]">
+                Open AI Sponsorship Matching to configure your institutional CSR budget, counties, and focus sectors.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {proactiveMatches.map((m) => {
+                  const inBatch = selectedBeneficiaryIds.includes(m.beneficiaryId);
+                  return (
+                    <div
+                      key={m.beneficiaryId}
+                      className="p-4 rounded-xl bg-white border border-[#102E36]/12 flex flex-col justify-between gap-3"
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-mono-num text-[#4A636A]">{m.county} County</span>
+                          <span className="font-mono-num font-extrabold text-[#287A59]">
+                            {m.compositeScore}% Match
+                          </span>
+                        </div>
+                        <div className="text-sm font-bold text-[#102E36]">{m.displayAlias}</div>
+                        <div className="text-xs text-[#4A636A] line-clamp-2">{m.geminiRationale}</div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <GlossyButton
+                          size="sm"
+                          variant={inBatch ? 'green' : 'ivory'}
+                          onClick={() => toggleBeneficiarySelection(m.beneficiaryId)}
+                        >
+                          {inBatch ? 'In Batch' : '+ Add to Batch'}
+                        </GlossyButton>
+                        <GlossyButton
+                          size="sm"
+                          variant="gold"
+                          onClick={() =>
+                            setDirectMatchCheckout({
+                              match: m,
+                              amountKes: String(
+                                Math.max(
+                                  1000,
+                                  Math.min(
+                                    50000,
+                                    Math.round((m.primaryNeed?.remainingGapMinor || 1000000) / 100)
+                                  )
+                                )
+                              ),
+                              mode: 'PLEDGE_ONLY',
+                              phone: user?.phoneE164 || '+254712345678',
+                            })
+                          }
+                        >
+                          Sponsor
+                        </GlossyButton>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
+      )}
+
+      {tab === 'matching' && (
+        <SponsorshipMatchingPanel
+          portalMode="CORPORATE"
+          categories={categories}
+          batchSelectedIds={selectedBeneficiaryIds}
+          onAddToBatch={(id) => toggleBeneficiarySelection(id)}
+          onSponsorMatch={(match, suggestedAmountKes) =>
+            setDirectMatchCheckout({
+              match,
+              amountKes: String(suggestedAmountKes),
+              mode: 'PLEDGE_ONLY',
+              phone: user?.phoneE164 || '+254712345678',
+            })
+          }
+          onDataChanged={loadAll}
+        />
       )}
 
       {tab === 'organisation' && (
@@ -823,8 +951,133 @@ export const CorporatePortal: React.FC = () => {
                 });
                 setPendingStk(null);
                 setFundCheckout(null);
+                setDirectMatchCheckout(null);
                 await loadAll();
-                setFeedback('Daraja callback verified and fund balance updated.');
+                setFeedback('Daraja callback verified and settlement ledger updated.');
+              }}
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              Verify Sandbox Callback (ResultCode 0)
+            </GlossyButton>
+          </div>
+        )}
+      </ModalDialog>
+
+      {/* Direct Matched Household Sponsorship Modal */}
+      <ModalDialog
+        open={Boolean(directMatchCheckout)}
+        title={`Sponsor ${directMatchCheckout?.match.displayAlias || ''}`}
+        subtitle={`${directMatchCheckout?.match.referenceCode || ''} · ${directMatchCheckout?.match.county || ''} County · Institutional / Well Wisher Sponsorship`}
+        onClose={() => {
+          setDirectMatchCheckout(null);
+          setPendingStk(null);
+        }}
+      >
+        {directMatchCheckout && !pendingStk && (
+          <div className="space-y-4">
+            <div className="p-3.5 rounded-xl bg-[#EAE6DC]/50 text-xs text-[#102E36] space-y-1">
+              <div className="font-bold">Matched Need: {directMatchCheckout.match.primaryNeed?.title || 'Household Support'}</div>
+              <div className="text-[#4A636A]">{directMatchCheckout.match.geminiRationale}</div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-[#102E36] mb-1">Amount (KES)</label>
+                <input
+                  type="number"
+                  min={500}
+                  value={directMatchCheckout.amountKes}
+                  onChange={(e) =>
+                    setDirectMatchCheckout({ ...directMatchCheckout, amountKes: e.target.value })
+                  }
+                  className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-[#102E36] mb-1">Settlement Mode</label>
+                <select
+                  value={directMatchCheckout.mode}
+                  onChange={(e) =>
+                    setDirectMatchCheckout({ ...directMatchCheckout, mode: e.target.value as any })
+                  }
+                  className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
+                >
+                  <option value="PLEDGE_ONLY">Corporate Pledge / Board Approval</option>
+                  <option value="MPESA_STK">Safaricom M-Pesa STK Push</option>
+                </select>
+              </div>
+            </div>
+            {directMatchCheckout.mode === 'MPESA_STK' && (
+              <input
+                value={directMatchCheckout.phone}
+                onChange={(e) =>
+                  setDirectMatchCheckout({ ...directMatchCheckout, phone: e.target.value })
+                }
+                placeholder="+254712345678"
+                className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15 font-mono-num"
+              />
+            )}
+            <GlossyButton
+              variant="gold"
+              className="w-full"
+              onClick={async () => {
+                setErrorMsg(null);
+                try {
+                  const amountMinor = Math.round(Number(directMatchCheckout.amountKes || 0) * 100);
+                  const res = await apiFetch<any>('/api/supporter/checkout', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      pathway: 'DIRECT_SPONSORSHIP',
+                      beneficiaryId: directMatchCheckout.match.beneficiaryId,
+                      needRequestId: directMatchCheckout.match.primaryNeed?.id,
+                      amountMinor,
+                      currency: 'KES',
+                      mode: directMatchCheckout.mode,
+                      phoneE164: directMatchCheckout.phone,
+                      sponsorshipCoverage: 'PARTIAL',
+                    }),
+                  });
+                  if (directMatchCheckout.mode === 'MPESA_STK' && res.paymentTx?.checkoutRequestId) {
+                    setPendingStk({ checkoutRequestId: res.paymentTx.checkoutRequestId, amountMinor });
+                  } else {
+                    setDirectMatchCheckout(null);
+                    await loadAll();
+                    setFeedback('Corporate sponsorship pledge initiated cleanly.');
+                  }
+                } catch (err: any) {
+                  setErrorMsg(err.message);
+                }
+              }}
+            >
+              <HeartHandshake className="w-4 h-4" />
+              {directMatchCheckout.mode === 'MPESA_STK'
+                ? 'Initiate M-Pesa STK Push'
+                : 'Record Institutional Sponsorship Pledge'}
+            </GlossyButton>
+          </div>
+        )}
+        {pendingStk && (
+          <div className="space-y-4 text-sm">
+            <div className="p-4 rounded-xl bg-[#EAE6DC]/60 space-y-1">
+              <div className="font-bold text-[#102E36]">Daraja Callback Pending</div>
+              <div className="font-mono-num text-xs text-[#4A636A]">
+                CheckoutRequestID: {pendingStk.checkoutRequestId}
+              </div>
+            </div>
+            <GlossyButton
+              variant="green"
+              onClick={async () => {
+                await apiFetch('/api/payments/mpesa/callback', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    checkoutRequestId: pendingStk.checkoutRequestId,
+                    resultCode: 0,
+                    amountKes: Math.round(pendingStk.amountMinor / 100),
+                  }),
+                });
+                setPendingStk(null);
+                setDirectMatchCheckout(null);
+                await loadAll();
+                setFeedback('Daraja callback verified and direct sponsorship activated.');
               }}
             >
               <CheckCircle2 className="w-4 h-4" />

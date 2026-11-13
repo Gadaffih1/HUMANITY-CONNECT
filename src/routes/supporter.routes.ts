@@ -16,6 +16,7 @@ import {
   communityProjects,
   volunteerAssignments,
   notifications,
+  sponsorshipMatchSuggestions,
 } from '../db/schema.ts';
 import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 import { sha256Hex } from '../lib/crypto.ts';
@@ -280,6 +281,16 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
           })
           .returning();
         sponsorshipRecord = sp;
+
+        await tx
+          .update(sponsorshipMatchSuggestions)
+          .set({ status: 'SPONSORED' })
+          .where(
+            and(
+              eq(sponsorshipMatchSuggestions.supporterId, supporter.id),
+              eq(sponsorshipMatchSuggestions.beneficiaryId, d.beneficiaryId)
+            )
+          );
       }
 
       if (d.isRecurring) {

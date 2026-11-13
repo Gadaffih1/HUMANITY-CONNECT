@@ -10,6 +10,7 @@ import {
   Bookmark,
   ShieldCheck,
   MessageSquare,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -23,9 +24,15 @@ import {
   type PublicBeneficiaryCardData,
   type PublicNeedItem,
 } from '../ui/DesignSystem';
+import {
+  SponsorshipMatchingPanel,
+  type MatchRecommendationItem,
+  type MatchingResponsePayload,
+} from '../matching/SponsorshipMatchingPanel';
 
 type SupporterTab =
   | 'dashboard'
+  | 'matching'
   | 'browse'
   | 'saved'
   | 'contributions'
@@ -103,6 +110,7 @@ export const SupporterPortal: React.FC<{
 
   // Case detail modal
   const [detailCase, setDetailCase] = useState<PublicBeneficiaryCardData | null>(null);
+  const [proactiveMatches, setProactiveMatches] = useState<MatchRecommendationItem[]>([]);
 
   const loadAll = async () => {
     try {
@@ -114,6 +122,14 @@ export const SupporterPortal: React.FC<{
       setPortal(pRes);
       setPublicCases(bRes.beneficiaries || []);
       setCategories(ovRes.categories || []);
+      try {
+        const matchRes = await apiFetch<MatchingResponsePayload>(
+          '/api/matching/recommendations?refreshAi=false'
+        );
+        setProactiveMatches((matchRes.matches || []).slice(0, 3));
+      } catch {
+        // Non-blocking background proactive preview
+      }
     } catch (err: any) {
       setErrorMsg(err.message);
     }
@@ -122,6 +138,54 @@ export const SupporterPortal: React.FC<{
   useEffect(() => {
     loadAll();
   }, []);
+
+  const openCheckoutFromMatch = (match: MatchRecommendationItem, suggestedAmountKes: number) => {
+    const publicBen = publicCases.find((c) => c.id === match.beneficiaryId);
+    const matchedNeed =
+      publicBen?.needs.find((n) => n.id === match.primaryNeed?.id) ||
+      (match.primaryNeed
+        ? ({
+            id: match.primaryNeed.id,
+            referenceCode: match.primaryNeed.referenceCode,
+            title: match.primaryNeed.title,
+            categoryCode: match.primaryNeed.categoryCode,
+            categoryName: match.primaryNeed.categoryName,
+            targetAmountMinor: match.primaryNeed.targetAmountMinor,
+            fulfilledAmountMinor: match.primaryNeed.fulfilledAmountMinor,
+            currency: match.primaryNeed.currency,
+            priorityTier: match.primaryNeed.priorityTier,
+            isRecurring: match.primaryNeed.isRecurring,
+            frequency: match.primaryNeed.frequency,
+          } as PublicNeedItem)
+        : undefined);
+
+    setAmountKes(String(suggestedAmountKes));
+    setCheckoutTarget({
+      pathway: 'DIRECT_SPONSORSHIP',
+      beneficiary:
+        publicBen ||
+        ({
+          id: match.beneficiaryId,
+          referenceCode: match.referenceCode,
+          classification: match.classification,
+          displayAlias: match.displayAlias,
+          countryCode: 'KE',
+          county: match.county,
+          isMinorCase: match.isMinorCase,
+          guardianOrgName: null,
+          vulnerabilitySummary: match.geminiRationale,
+          verificationLevel: 'V4',
+          verificationStatus: 'VERIFIED',
+          monthlyNeedTargetMinor: suggestedAmountKes * 100,
+          currency: 'KES',
+          storyTitle: match.storyTitle,
+          storySummary: match.storySummary,
+          coverImagePath: match.coverImagePath,
+          needs: matchedNeed ? [matchedNeed] : [],
+        } as PublicBeneficiaryCardData),
+      need: matchedNeed,
+    });
+  };
 
   const savedIds = new Set((portal?.savedBeneficiaries || []).map((s: any) => s.beneficiaryId));
 
@@ -179,6 +243,7 @@ export const SupporterPortal: React.FC<{
       <div className="flex flex-wrap gap-2 p-1.5 rounded-2xl bg-[#EAE6DC]/70">
         {[
           { id: 'dashboard', label: 'Dashboard' },
+          { id: 'matching', label: 'AI Smart Matching' },
           { id: 'browse', label: 'Browse & Urgent Needs' },
           { id: 'saved', label: `Saved (${savedIds.size})` },
           { id: 'contributions', label: 'Contributions & Receipts' },
@@ -246,6 +311,57 @@ export const SupporterPortal: React.FC<{
             </div>
           </div>
 
+          {/* Proactive AI Match Suggestions on Supporter Dashboard */}
+          <div className="hc-card p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[#287A59] flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-[#D9A84E]" />
+                  Proactive Sponsorship Suggestions
+                </div>
+                <h3 className="text-lg font-bold text-[#102E36]">
+                  Verified Households Matched to Your Preferences
+                </h3>
+              </div>
+              <GlossyButton size="sm" variant="teal" onClick={() => setTab('matching')}>
+                Open AI Matching Engine
+              </GlossyButton>
+            </div>
+
+            {proactiveMatches.length === 0 ? (
+              <div className="text-xs text-[#4A636A]">
+                Open the AI Smart Matching tab to set your target budget, counties, and interest categories.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {proactiveMatches.map((m) => (
+                  <div
+                    key={m.beneficiaryId}
+                    className="p-4 rounded-xl bg-white border border-[#102E36]/12 flex flex-col justify-between gap-3"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-mono-num text-[#4A636A]">{m.county} County</span>
+                        <span className="font-mono-num font-extrabold text-[#287A59]">
+                          {m.compositeScore}% Match
+                        </span>
+                      </div>
+                      <div className="text-sm font-bold text-[#102E36]">{m.displayAlias}</div>
+                      <div className="text-xs text-[#4A636A] line-clamp-2">{m.geminiRationale}</div>
+                    </div>
+                    <GlossyButton
+                      size="sm"
+                      variant="gold"
+                      onClick={() => openCheckoutFromMatch(m, 5000)}
+                    >
+                      Sponsor Match
+                    </GlossyButton>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="space-y-3">
             <h3 className="text-lg font-bold text-[#102E36]">Your Direct Sponsorships</h3>
             {(portal?.sponsorships || []).length === 0 ? (
@@ -260,6 +376,15 @@ export const SupporterPortal: React.FC<{
             )}
           </div>
         </div>
+      )}
+
+      {tab === 'matching' && (
+        <SponsorshipMatchingPanel
+          portalMode="SUPPORTIVE"
+          categories={categories}
+          onSponsorMatch={openCheckoutFromMatch}
+          onDataChanged={loadAll}
+        />
       )}
 
       {tab === 'browse' && (

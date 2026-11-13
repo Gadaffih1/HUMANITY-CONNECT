@@ -167,6 +167,8 @@ export const beneficiaryProfiles = pgTable(
     assignedOfficerId: uuid('assigned_officer_id').references(() => users.id),
     monthlyNeedTargetMinor: integer('monthly_need_target_minor').notNull().default(650000),
     currency: text('currency').notNull().default('KES'),
+    ageGroup: text('age_group').notNull().default('MULTI_GENERATIONAL'), // CHILDREN_5_17 | YOUNG_ADULT_18_25 | ADULT_26_59 | ELDERLY_60_PLUS | MULTI_GENERATIONAL
+    specificChallenges: jsonb('specific_challenges').$type<string[]>().notNull().default([]),
     photoLimitOverrideReason: text('photo_limit_override_reason'),
     audioNarrationObjectKey: text('audio_narration_object_key'),
     audioTranscript: text('audio_transcript'),
@@ -820,6 +822,113 @@ export const financialApprovals = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [check('chk_fin_approval_pos', sql`${t.amountMinor} > 0`)]
+);
+
+// 36. Matching Engine Configuration (Transparent, Administrator-Configurable Algorithm Weights)
+export const matchingEngineConfig = pgTable('matching_engine_config', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  configKey: text('config_key').notNull().unique().default('DEFAULT'),
+  algorithmName: text('algorithm_name')
+    .notNull()
+    .default('Humanity Connect Dynamic Impact Matcher'),
+  weightNeedAlignment: integer('weight_need_alignment').notNull().default(30),
+  weightLocationFocus: integer('weight_location_focus').notNull().default(20),
+  weightBudgetFit: integer('weight_budget_fit').notNull().default(20),
+  weightUrgencyImpact: integer('weight_urgency_impact').notNull().default(20),
+  weightAgeDemographics: integer('weight_age_demographics').notNull().default(10),
+  prioritiseUnderfundedPct: integer('prioritise_underfunded_pct').notNull().default(60),
+  minThresholdScore: integer('min_threshold_score').notNull().default(35),
+  enableGeminiAnalysis: boolean('enable_gemini_analysis').notNull().default(true),
+  requireHumanSafeguardGate: boolean('require_human_safeguard_gate').notNull().default(true),
+  transparencyNotes: text('transparency_notes')
+    .notNull()
+    .default(
+      'Scores combine deterministic weighted criteria (Need, Location, Budget, Urgency/Underfunded Gap, Age/Challenges) with bounded Gemini AI contextual analysis. Only V4-verified, safeguarding-cleared cases are eligible.'
+    ),
+  updatedBy: uuid('updated_by').references(() => users.id),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+// 37. Sponsor Matching Preferences (Individuals, Companies, Charities, Foundations, NGOs)
+export const sponsorMatchingPreferences = pgTable('sponsor_matching_preferences', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  supporterId: uuid('supporter_id')
+    .notNull()
+    .unique()
+    .references(() => supporterProfiles.id, { onDelete: 'cascade' }),
+  sponsorEntityType: text('sponsor_entity_type').notNull().default('INDIVIDUAL'), // INDIVIDUAL | COMPANY | INSTITUTION
+  budgetMinor: integer('budget_minor').notNull().default(600000),
+  currency: text('currency').notNull().default('KES'),
+  preferredCadence: text('preferred_cadence').notNull().default('MONTHLY'), // ONE_TIME | WEEKLY | MONTHLY | TERMLY | QUARTERLY | ANNUALLY
+  interestCategories: jsonb('interest_categories')
+    .$type<string[]>()
+    .notNull()
+    .default(['EDUCATION', 'FOOD', 'MEDICAL']),
+  locationFocus: jsonb('location_focus').$type<string[]>().notNull().default(['ALL']),
+  preferredAgeGroups: jsonb('preferred_age_groups').$type<string[]>().notNull().default(['ALL']),
+  preferredClassifications: jsonb('preferred_classifications')
+    .$type<string[]>()
+    .notNull()
+    .default(['ORPHAN_GUARDIAN', 'DESTITUTE', 'NEEDY']),
+  impactGoal: text('impact_goal')
+    .notNull()
+    .default('Prioritise high-urgency household stability, schooling continuity, and sustainable livelihoods.'),
+  proactiveOptIn: boolean('proactive_opt_in').notNull().default(true),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+// 38. Sponsorship Match Suggestions (Proactive Transparent AI-Assisted Match Records)
+export const sponsorshipMatchSuggestions = pgTable(
+  'sponsorship_match_suggestions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    supporterId: uuid('supporter_id')
+      .notNull()
+      .references(() => supporterProfiles.id, { onDelete: 'cascade' }),
+    beneficiaryId: uuid('beneficiary_id')
+      .notNull()
+      .references(() => beneficiaryProfiles.id, { onDelete: 'cascade' }),
+    needRequestId: uuid('need_request_id').references(() => needRequests.id),
+    compositeScore: integer('composite_score').notNull(),
+    breakdownJson: jsonb('breakdown_json')
+      .$type<{
+        needScore: number;
+        locationScore: number;
+        budgetScore: number;
+        urgencyScore: number;
+        ageScore: number;
+        geminiDelta: number;
+        weights: {
+          need: number;
+          location: number;
+          budget: number;
+          urgency: number;
+          age: number;
+        };
+        factorNotes: string[];
+      }>()
+      .notNull(),
+    beneficiarySignalsJson: jsonb('beneficiary_signals_json')
+      .$type<{
+        ageGroup: string;
+        challenges: string[];
+        needCategories: string[];
+        county: string;
+        remainingGapMinor: number;
+        priorityTier: string;
+      }>()
+      .notNull(),
+    geminiRationale: text('gemini_rationale'),
+    geminiImpactProjection: text('gemini_impact_projection'),
+    recommendedApproach: text('recommended_approach'),
+    usedModel: text('used_model'),
+    status: text('status').notNull().default('SUGGESTED'), // SUGGESTED | SAVED | SPONSORED | DISMISSED
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('idx_match_suggestions_supporter').on(t.supporterId, t.compositeScore),
+    check('chk_match_score_range', sql`${t.compositeScore} >= 0 AND ${t.compositeScore} <= 100`),
+  ]
 );
 
 // Drizzle Relations

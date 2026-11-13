@@ -31,10 +31,12 @@ import {
   securelyWipeOfflineRecord,
   type OfflineFieldRecord,
 } from '../../lib/offlineVault';
+import { AdminMatchingGovernancePanel } from '../matching/AdminMatchingGovernancePanel';
 
 type AdminTab =
   | 'verification'
   | 'needs'
+  | 'matching'
   | 'finance'
   | 'safeguarding'
   | 'empowerment'
@@ -272,6 +274,7 @@ export const AdminVerificationPortal: React.FC = () => {
         {[
           { id: 'verification', label: 'Verification Centre (V0–V4)' },
           { id: 'needs', label: 'Needs Engine (15 Cats)' },
+          { id: 'matching', label: 'AI Matching Engine' },
           { id: 'finance', label: 'Finance & Daraja M-Pesa' },
           { id: 'safeguarding', label: 'Safeguarding & DPIA' },
           { id: 'empowerment', label: 'Empowerment & Projects' },
@@ -1323,6 +1326,9 @@ export const AdminVerificationPortal: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* 2b. Dynamic Sponsorship Matching Engine Governance */}
+      {tab === 'matching' && <AdminMatchingGovernancePanel />}
 
       {/* 7. RBAC, Communication Templates & Audit Logs */}
       {tab === 'governance' && (

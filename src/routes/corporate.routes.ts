@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
-import { eq, desc, inArray } from 'drizzle-orm';
+import { eq, and, desc, inArray } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   organisations,
@@ -13,6 +13,7 @@ import {
   sponsorships,
   beneficiaryProfiles,
   users,
+  sponsorshipMatchSuggestions,
 } from '../db/schema.ts';
 import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 
@@ -278,6 +279,16 @@ corporateRouter.post('/bulk-sponsor', async (req: AuthRequest, res) => {
           });
         }
         results.push({ sponsorship: sp, donation: don });
+
+        await tx
+          .update(sponsorshipMatchSuggestions)
+          .set({ status: 'SPONSORED' })
+          .where(
+            and(
+              eq(sponsorshipMatchSuggestions.supporterId, supporter.id),
+              eq(sponsorshipMatchSuggestions.beneficiaryId, bId)
+            )
+          );
       }
       return results;
     });
