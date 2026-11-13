@@ -19,7 +19,7 @@ import {
   empowermentMilestones,
   matchingEngineConfig,
 } from './schema.ts';
-import { encryptSensitiveText, hashPassword } from '../lib/crypto.ts';
+import { encryptSensitiveText } from '../lib/crypto.ts';
 
 let seedPromise: Promise<void> | null = null;
 
@@ -156,60 +156,6 @@ async function runSeed(): Promise<void> {
         .values({ roleId: rId, permissionId: pId })
         .onConflictDoNothing();
     }
-  }
-
-  // 2b. Seed Super Admin account (idempotent even on already-populated DB)
-  const superAdminEmail = 'gadmoz@gmail.com';
-  const superAdminPasswordHash = await hashPassword('Jayden@Arabella123');
-  const superAdminRoleId = roleMap.get('SUPER_ADMIN');
-
-  const [existingAdmin] = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, superAdminEmail))
-    .limit(1);
-
-  let superAdminUserId = existingAdmin?.id;
-  if (!existingAdmin) {
-    const [insertedAdmin] = await db
-      .insert(users)
-      .values({
-        email: superAdminEmail,
-        fullName: 'Super Administrator',
-        phoneE164: '+254700000001',
-        passwordHash: superAdminPasswordHash,
-        countryCode: 'KE',
-        emailVerifiedAt: new Date(),
-        phoneVerifiedAt: new Date(),
-        mfaEnabled: false,
-        approvalStatus: 'ACTIVE',
-      })
-      .returning();
-    superAdminUserId = insertedAdmin.id;
-  } else {
-    await db
-      .update(users)
-      .set({
-        passwordHash: superAdminPasswordHash,
-        emailVerifiedAt: existingAdmin.emailVerifiedAt || new Date(),
-        phoneVerifiedAt: existingAdmin.phoneVerifiedAt || new Date(),
-        approvalStatus: 'ACTIVE',
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-      })
-      .where(eq(users.id, existingAdmin.id));
-  }
-
-  if (superAdminUserId && superAdminRoleId) {
-    await db
-      .insert(userRoles)
-      .values({
-        userId: superAdminUserId,
-        roleId: superAdminRoleId,
-        assignedBy: superAdminUserId,
-        status: 'ACTIVE',
-      })
-      .onConflictDoNothing();
   }
 
   // 3. 15 Needs Categories
