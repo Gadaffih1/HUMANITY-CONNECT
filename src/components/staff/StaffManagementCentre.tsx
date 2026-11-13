@@ -9,17 +9,20 @@ import {
   MessageSquare,
   BarChart3,
   BookOpen,
+  ClipboardCheck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { StaffDirectoryAndOrgChart } from './StaffDirectoryAndOrgChart';
 import { RecruitmentAndProfilesPanel } from './RecruitmentAndProfilesPanel';
 import { FieldAndDeptWorkspacesPanel } from './FieldAndDeptWorkspacesPanel';
 import { PerformanceCommsReportsPanel } from './PerformanceCommsReportsPanel';
+import { OnboardingProgressTrackerPanel } from './OnboardingProgressTrackerPanel';
 
 type StaffCentreTab =
   | 'directory'
   | 'org-chart'
   | 'recruitment'
+  | 'onboarding'
   | 'profiles'
   | 'field-ops'
   | 'departments'
@@ -89,6 +92,7 @@ export const StaffManagementCentre: React.FC<StaffManagementCentreProps> = ({
 
   if (mode === 'admin' && user) {
     tabs.push(
+      { id: 'onboarding', label: 'Onboarding Tracker', icon: <ClipboardCheck className="w-3.5 h-3.5" /> },
       { id: 'profiles', label: 'Staff Profiles & Discipline', icon: <Users className="w-3.5 h-3.5" /> },
       { id: 'departments', label: '15 Dept Workspaces', icon: <Building2 className="w-3.5 h-3.5" /> },
       { id: 'field-ops', label: '47 Counties & Intl Ops', icon: <MapPin className="w-3.5 h-3.5" /> },
@@ -96,6 +100,8 @@ export const StaffManagementCentre: React.FC<StaffManagementCentreProps> = ({
       { id: 'comms-tasks', label: 'Comms & Tasks', icon: <MessageSquare className="w-3.5 h-3.5" /> },
       { id: 'hr-reports', label: '17 HR Reports', icon: <BarChart3 className="w-3.5 h-3.5" /> }
     );
+  } else if (user) {
+    tabs.push({ id: 'onboarding', label: 'My Onboarding', icon: <ClipboardCheck className="w-3.5 h-3.5" /> });
   }
 
   return (
@@ -170,6 +176,14 @@ export const StaffManagementCentre: React.FC<StaffManagementCentreProps> = ({
               preselectJobId={preselectVacancyJobId}
               onRefreshDirectory={loadDirectoryAndRevisions}
               onNavigateAuth={onNavigateAuth}
+            />
+          )}
+
+          {activeTab === 'onboarding' && user && (
+            <OnboardingProgressTrackerPanel
+              canManageHr={canManageHr}
+              isAuditor={isAuditor}
+              onRefreshDirectory={loadDirectoryAndRevisions}
             />
           )}
 

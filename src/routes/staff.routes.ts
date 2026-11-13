@@ -22,6 +22,7 @@ import {
   communityProjects,
   volunteerAssignments,
   empowermentMilestones,
+  staffOnboardingChecklists,
 } from '../db/schema.ts';
 import {
   requireAuth,
@@ -43,6 +44,12 @@ import {
   screenGeneralCommunicationForConfidentiality,
   userCanViewSafeguardingCases,
 } from '../lib/rbacPolicy.ts';
+import {
+  buildDefaultOnboardingMilestones,
+  canVerifyOnboardingMilestone,
+  computeOnboardingProgress,
+  isOnboardingReadyForActivation,
+} from '../lib/onboardingTracker.ts';
 
 export const staffRouter = Router();
 
@@ -1158,6 +1165,53 @@ staffRouter.patch('/recruitment/applications/:id/stage', requirePrivilegedMfa, a
           .where(eq(staffPositions.id, pos.id));
       }
 
+      // Automated Onboarding Trigger: create Onboarding Progress Tracker at Stage 13 (APPOINTMENT_APPROVED) or 14 (ONBOARDING)
+      if (
+        (d.stage === 'APPOINTMENT_APPROVED' || d.stage === 'ONBOARDING' || d.stage === 'ACTIVE_EMPLOYEE') &&
+        pos
+      ) {
+        const [existingOnb] = await tx
+          .select()
+          .from(staffOnboardingChecklists)
+          .where(eq(staffOnboardingChecklists.applicationId, existing.id))
+          .limit(1);
+
+        if (!existingOnb) {
+          const allDocsVerified =
+            existing.documentsJson.length > 0 && existing.documentsJson.every((doc) => doc.verified);
+          const milestones = buildDefaultOnboardingMilestones({
+            jobId: pos.jobId,
+            jobTitle: pos.jobTitle,
+            department: pos.department,
+            requiredQualifications: pos.requiredQualifications,
+            professionalQualifications: pos.professionalQualifications,
+            safeguardingResponsibilities: pos.safeguardingResponsibilities,
+            applicationDocsVerified: Boolean(d.verifyAllDocuments || allDocsVerified),
+            backgroundCleared: (d.backgroundCheckStatus || existing.backgroundCheckStatus) === 'CLEARED',
+          });
+          const progress = computeOnboardingProgress(milestones, false);
+          const onbRef = `ONB-${new Date().getFullYear()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+          const due = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+
+          await tx.insert(staffOnboardingChecklists).values({
+            onboardingRef: onbRef,
+            applicationId: existing.id,
+            userId: existing.applicantUserId || null,
+            jobId: pos.jobId,
+            departmentNumber: pos.departmentNumber,
+            department: pos.department,
+            jobTitle: pos.jobTitle,
+            newHireNameEnc: existing.applicantNameEnc,
+            newHireEmailEnc: existing.applicantEmailEnc,
+            overallStatus: progress.overallStatus,
+            completionPct: progress.completionPct,
+            dueDate: due,
+            milestonesJson: milestones,
+            createdByUserId: req.authUser!.userId,
+          });
+        }
+      }
+
       if (existing.applicantUserId) {
         await tx.insert(notifications).values({
           userId: existing.applicantUserId,
@@ -1328,6 +1382,36 @@ staffRouter.post('/profiles', requirePrivilegedMfa, async (req: AuthRequest, res
             updatedAt: new Date(),
           })
           .where(eq(staffPositions.id, pos.id));
+      }
+
+      // Automated Onboarding Trigger when creating a new appointed/pending staff profile
+      if (d.employmentStatus === 'PENDING_APPOINTMENT' || d.employmentStatus === 'ACTIVE') {
+        const milestones = buildDefaultOnboardingMilestones({
+          jobId: pos.jobId,
+          jobTitle: pos.jobTitle,
+          department: pos.department,
+          requiredQualifications: pos.requiredQualifications,
+          professionalQualifications: pos.professionalQualifications,
+          safeguardingResponsibilities: pos.safeguardingResponsibilities,
+        });
+        const progress = computeOnboardingProgress(milestones, false);
+        const onbRef = `ONB-${new Date().getFullYear()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+        await tx.insert(staffOnboardingChecklists).values({
+          onboardingRef: onbRef,
+          staffProfileId: profile.id,
+          userId: d.userId || null,
+          jobId: pos.jobId,
+          departmentNumber: pos.departmentNumber,
+          department: pos.department,
+          jobTitle: pos.jobTitle,
+          newHireNameEnc: encryptSensitiveText(d.fullLegalName.trim()),
+          newHireEmailEnc: encryptSensitiveText(d.contactEmail.trim().toLowerCase()),
+          overallStatus: progress.overallStatus,
+          completionPct: progress.completionPct,
+          dueDate: new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
+          milestonesJson: milestones,
+          createdByUserId: req.authUser!.userId,
+        });
       }
 
       return profile;
@@ -2357,7 +2441,7 @@ staffRouter.get('/reports/hr-summary', async (req: AuthRequest, res) => {
     const fromDate = typeof req.query.fromDate === 'string' && req.query.fromDate ? new Date(req.query.fromDate) : null;
     const toDate = typeof req.query.toDate === 'string' && req.query.toDate ? new Date(`${req.query.toDate}T23:59:59Z`) : null;
 
-    const [positions, profiles, vacancies, apps, reviews, tasks, fieldOfficers, volunteers] = await Promise.all([
+    const [positions, profiles, vacancies, apps, reviews, tasks, fieldOfficers, volunteers, onboardingRows] = await Promise.all([
       db.select().from(staffPositions),
       db.select().from(staffEmployeeProfiles),
       db.select().from(staffVacancies),
@@ -2366,6 +2450,7 @@ staffRouter.get('/reports/hr-summary', async (req: AuthRequest, res) => {
       db.select().from(internalStaffTasks),
       db.select().from(fieldGeographyOfficers),
       db.select().from(volunteerAssignments),
+      db.select().from(staffOnboardingChecklists),
     ]);
 
     const filteredPositions = positions.filter((p) => {
@@ -2535,10 +2620,450 @@ staffRouter.get('/reports/hr-summary', async (req: AuthRequest, res) => {
         departmentalStaffingNeeds,
         staffExits,
         organisationalCapacity,
+        onboardingSummary: {
+          totalTrackers: onboardingRows.length,
+          readyForActivation: onboardingRows.filter((o) => o.overallStatus === 'READY_FOR_ACTIVATION').length,
+          inProgress: onboardingRows.filter((o) => o.overallStatus === 'IN_PROGRESS' || o.overallStatus === 'NOT_STARTED').length,
+          completed: onboardingRows.filter((o) => o.overallStatus === 'COMPLETED').length,
+          avgCompletionPct:
+            onboardingRows.length > 0
+              ? Math.round(
+                  onboardingRows.reduce((acc, o) => acc + o.completionPct, 0) / onboardingRows.length
+                )
+              : 0,
+        },
       },
     });
   } catch (err) {
     console.error('HR summary reports error:', err);
     res.status(500).json({ error: 'Unable to compile HR & Organisational reports.' });
+  }
+});
+
+// =========================================================================
+// 11. AUTOMATED STAFF ONBOARDING PROGRESS TRACKER (DOCUMENTS, TRAINING, CREDENTIALS)
+// =========================================================================
+
+staffRouter.get('/onboarding', async (req: AuthRequest, res) => {
+  try {
+    const canSeeAll = hasRecruitmentReadAuthority(req) || hasAdminStaffAccess(req);
+    const auditorMask = isAuditorOnly(req);
+    const rows = await db
+      .select()
+      .from(staffOnboardingChecklists)
+      .orderBy(desc(staffOnboardingChecklists.updatedAt));
+
+    const visibleRows = canSeeAll
+      ? rows
+      : rows.filter((r) => r.userId && r.userId === req.authUser!.userId);
+
+    const formatted = visibleRows.map((row) => {
+      const fullName = decryptSensitiveText(row.newHireNameEnc);
+      const email = decryptSensitiveText(row.newHireEmailEnc);
+      const computed = computeOnboardingProgress(
+        row.milestonesJson,
+        row.overallStatus === 'COMPLETED' || Boolean(row.activatedAt)
+      );
+
+      return {
+        id: row.id,
+        onboardingRef: row.onboardingRef,
+        applicationId: row.applicationId,
+        staffProfileId: row.staffProfileId,
+        userId: row.userId,
+        jobId: row.jobId,
+        departmentNumber: row.departmentNumber,
+        department: row.department,
+        jobTitle: row.jobTitle,
+        newHireName: auditorMask ? `${fullName.slice(0, 2)}*** (Audit Masked)` : fullName,
+        newHireEmail: auditorMask ? `***@${email.split('@')[1] || 'hidden'}` : email,
+        overallStatus: row.overallStatus,
+        completionPct: computed.completionPct,
+        tracks: computed.tracks,
+        completedRequiredCount: computed.completedRequiredCount,
+        requiredMilestones: computed.requiredMilestones,
+        submittedCount: computed.submittedCount,
+        rejectedCount: computed.rejectedCount,
+        dueDate: row.dueDate,
+        milestones: row.milestonesJson,
+        activatedAt: row.activatedAt,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      };
+    });
+
+    const summary = {
+      total: formatted.length,
+      notStarted: formatted.filter((f) => f.overallStatus === 'NOT_STARTED').length,
+      inProgress: formatted.filter((f) => f.overallStatus === 'IN_PROGRESS').length,
+      blocked: formatted.filter((f) => f.overallStatus === 'BLOCKED').length,
+      readyForActivation: formatted.filter((f) => f.overallStatus === 'READY_FOR_ACTIVATION').length,
+      completed: formatted.filter((f) => f.overallStatus === 'COMPLETED').length,
+      avgCompletionPct:
+        formatted.length > 0
+          ? Math.round(formatted.reduce((acc, f) => acc + f.completionPct, 0) / formatted.length)
+          : 0,
+    };
+
+    res.json({ checklists: formatted, summary });
+  } catch (err) {
+    console.error('Load onboarding progress error:', err);
+    res.status(500).json({ error: 'Unable to load automated onboarding tracker.' });
+  }
+});
+
+staffRouter.post('/onboarding', requirePrivilegedMfa, async (req: AuthRequest, res) => {
+  try {
+    if (isAuditorOnly(req) || !hasHrAuthority(req)) {
+      return res.status(403).json({ error: 'Authorised HR Officer or Super Admin privileges required to initiate onboarding.' });
+    }
+
+    const schema = z.object({
+      staffProfileId: z.string().uuid().optional(),
+      applicationId: z.string().uuid().optional(),
+      dueDate: z.string().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success || (!parsed.data.staffProfileId && !parsed.data.applicationId)) {
+      return res.status(400).json({ error: 'Provide either an existing staffProfileId or approved applicationId.' });
+    }
+    const d = parsed.data;
+
+    let pos: typeof staffPositions.$inferSelect | undefined;
+    let newHireName = '';
+    let newHireEmail = '';
+    let targetUserId: string | null = null;
+    let appDocsVerified = false;
+    let bgCleared = false;
+
+    if (d.staffProfileId) {
+      const [existingOnb] = await db
+        .select()
+        .from(staffOnboardingChecklists)
+        .where(eq(staffOnboardingChecklists.staffProfileId, d.staffProfileId))
+        .limit(1);
+      if (existingOnb) {
+        return res.status(400).json({ error: `Onboarding tracker ${existingOnb.onboardingRef} already exists for this staff profile.` });
+      }
+      const [prof] = await db
+        .select()
+        .from(staffEmployeeProfiles)
+        .where(eq(staffEmployeeProfiles.id, d.staffProfileId))
+        .limit(1);
+      if (!prof) return res.status(404).json({ error: 'Staff profile not found.' });
+      const [foundPos] = await db.select().from(staffPositions).where(eq(staffPositions.jobId, prof.jobId)).limit(1);
+      pos = foundPos;
+      newHireName = prof.fullLegalName;
+      newHireEmail = prof.contactEmail;
+      targetUserId = prof.userId;
+    } else if (d.applicationId) {
+      const [existingOnb] = await db
+        .select()
+        .from(staffOnboardingChecklists)
+        .where(eq(staffOnboardingChecklists.applicationId, d.applicationId))
+        .limit(1);
+      if (existingOnb) {
+        return res.status(400).json({ error: `Onboarding tracker ${existingOnb.onboardingRef} already exists for this application.` });
+      }
+      const [app] = await db
+        .select()
+        .from(recruitmentApplications)
+        .where(eq(recruitmentApplications.id, d.applicationId))
+        .limit(1);
+      if (!app) return res.status(404).json({ error: 'Recruitment application not found.' });
+      const [foundPos] = await db.select().from(staffPositions).where(eq(staffPositions.jobId, app.jobId)).limit(1);
+      pos = foundPos;
+      newHireName = decryptSensitiveText(app.applicantNameEnc);
+      newHireEmail = decryptSensitiveText(app.applicantEmailEnc);
+      targetUserId = app.applicantUserId;
+      appDocsVerified = app.documentsJson.length > 0 && app.documentsJson.every((doc) => doc.verified);
+      bgCleared = app.backgroundCheckStatus === 'CLEARED';
+    }
+
+    if (!pos) return res.status(404).json({ error: 'Approved organisational position not found.' });
+
+    const milestones = buildDefaultOnboardingMilestones({
+      jobId: pos.jobId,
+      jobTitle: pos.jobTitle,
+      department: pos.department,
+      requiredQualifications: pos.requiredQualifications,
+      professionalQualifications: pos.professionalQualifications,
+      safeguardingResponsibilities: pos.safeguardingResponsibilities,
+      applicationDocsVerified: appDocsVerified,
+      backgroundCleared: bgCleared,
+    });
+    const progress = computeOnboardingProgress(milestones, false);
+    const onboardingRef = `ONB-${new Date().getFullYear()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+
+    const [created] = await db
+      .insert(staffOnboardingChecklists)
+      .values({
+        onboardingRef,
+        applicationId: d.applicationId || null,
+        staffProfileId: d.staffProfileId || null,
+        userId: targetUserId,
+        jobId: pos.jobId,
+        departmentNumber: pos.departmentNumber,
+        department: pos.department,
+        jobTitle: pos.jobTitle,
+        newHireNameEnc: encryptSensitiveText(newHireName),
+        newHireEmailEnc: encryptSensitiveText(newHireEmail),
+        overallStatus: progress.overallStatus,
+        completionPct: progress.completionPct,
+        dueDate: d.dueDate || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
+        milestonesJson: milestones,
+        createdByUserId: req.authUser!.userId,
+      })
+      .returning();
+
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'STAFF_ONBOARDING_INITIATED',
+      entityType: 'staff_onboarding_checklists',
+      entityId: created.id,
+      ip: req.ip,
+      details: { onboardingRef, jobId: pos.jobId },
+    });
+
+    res.status(201).json({ onboardingRef, checklist: created });
+  } catch (err) {
+    console.error('Initiate onboarding error:', err);
+    res.status(500).json({ error: 'Unable to initiate onboarding progress tracker.' });
+  }
+});
+
+staffRouter.patch('/onboarding/:id/milestones', async (req: AuthRequest, res) => {
+  try {
+    if (isAuditorOnly(req)) {
+      return res.status(403).json({ error: 'Auditors hold read-only audit access.' });
+    }
+
+    const schema = z.object({
+      milestoneCode: z.string().min(2),
+      status: z.enum(['PENDING', 'SUBMITTED', 'VERIFIED', 'WAIVED', 'REJECTED']),
+      evidenceRef: z.string().max(300).optional(),
+      notes: z.string().max(500).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Valid onboarding milestone code and status required.' });
+    }
+    const d = parsed.data;
+    const checklistId = String(req.params.id);
+
+    const [tracker] = await db
+      .select()
+      .from(staffOnboardingChecklists)
+      .where(eq(staffOnboardingChecklists.id, checklistId))
+      .limit(1);
+    if (!tracker) return res.status(404).json({ error: 'Onboarding checklist not found.' });
+
+    const isOwner = Boolean(tracker.userId && tracker.userId === req.authUser!.userId);
+    const isVerifier =
+      hasHrAuthority(req) ||
+      req.authUser!.roles.includes('COUNTY_REPRESENTATIVE') ||
+      req.authUser!.permissions.includes('canVerifyUsers');
+
+    if (d.status === 'SUBMITTED' || d.status === 'PENDING') {
+      if (!isOwner && !isVerifier) {
+        return res.status(403).json({ error: 'You are not authorised to update this onboarding checklist.' });
+      }
+    } else {
+      // Verifying, waiving, or rejecting credentials requires HR/Supervisor + MFA step-up + anti-self-approval
+      if (!isVerifier) {
+        return res.status(403).json({
+          error: 'Only authorised HR Officers or supervisors may verify, waive, or reject onboarding milestones.',
+        });
+      }
+      if (req.authUser!.mfaEnabled && !req.authUser!.mfaVerifiedInSession) {
+        return res.status(403).json({ error: 'TOTP MFA verification required for credential verification actions.' });
+      }
+      const guard = canVerifyOnboardingMilestone(req.authUser!.userId, tracker.userId);
+      if (!guard.allowed) {
+        return res.status(403).json({ error: guard.reason });
+      }
+    }
+
+    const targetIdx = tracker.milestonesJson.findIndex((m) => m.code === d.milestoneCode);
+    if (targetIdx === -1) {
+      return res.status(404).json({ error: 'Onboarding milestone code not found on this checklist.' });
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedMilestones = tracker.milestonesJson.map((m, idx) => {
+      if (idx !== targetIdx) return m;
+      return {
+        ...m,
+        status: d.status,
+        ...(d.evidenceRef !== undefined ? { evidenceRef: d.evidenceRef.trim() } : {}),
+        ...(d.notes !== undefined ? { notes: d.notes.trim() } : {}),
+        ...(d.status === 'SUBMITTED' ? { submittedAt: nowIso } : {}),
+        ...(d.status === 'VERIFIED' || d.status === 'WAIVED' || d.status === 'REJECTED'
+          ? {
+              verifiedAt: nowIso,
+              verifiedByName: req.authUser!.fullName,
+              verifiedByUserId: req.authUser!.userId,
+            }
+          : {}),
+      };
+    });
+
+    const targetMilestone = updatedMilestones[targetIdx];
+    const progress = computeOnboardingProgress(
+      updatedMilestones,
+      tracker.overallStatus === 'COMPLETED' && d.status !== 'REJECTED'
+    );
+
+    const updated = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(staffOnboardingChecklists)
+        .set({
+          milestonesJson: updatedMilestones,
+          completionPct: progress.completionPct,
+          overallStatus: progress.overallStatus,
+          updatedAt: new Date(),
+        })
+        .where(eq(staffOnboardingChecklists.id, tracker.id))
+        .returning();
+
+      // Synchronise verified onboarding training automatically to Staff Employee Profile trainingHistory
+      if (
+        tracker.staffProfileId &&
+        targetMilestone.category === 'TRAINING_COMPLETION' &&
+        d.status === 'VERIFIED'
+      ) {
+        const [prof] = await tx
+          .select()
+          .from(staffEmployeeProfiles)
+          .where(eq(staffEmployeeProfiles.id, tracker.staffProfileId))
+          .limit(1);
+        if (prof) {
+          const alreadyLogged = prof.trainingHistory.some(
+            (t) => t.course.toLowerCase() === targetMilestone.title.toLowerCase()
+          );
+          if (!alreadyLogged) {
+            await tx
+              .update(staffEmployeeProfiles)
+              .set({
+                trainingHistory: [
+                  ...prof.trainingHistory,
+                  {
+                    date: nowIso.slice(0, 10),
+                    course: targetMilestone.title,
+                    provider: 'Humanity Connect Automated Onboarding Academy',
+                    status: 'COMPLETED',
+                  },
+                ],
+                updatedAt: new Date(),
+              })
+              .where(eq(staffEmployeeProfiles.id, prof.id));
+          }
+        }
+      }
+
+      return row;
+    });
+
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'ONBOARDING_MILESTONE_UPDATED',
+      entityType: 'staff_onboarding_checklists',
+      entityId: tracker.id,
+      ip: req.ip,
+      details: {
+        onboardingRef: tracker.onboardingRef,
+        milestoneCode: d.milestoneCode,
+        newStatus: d.status,
+        completionPct: progress.completionPct,
+        overallStatus: progress.overallStatus,
+      },
+    });
+
+    res.json({ checklist: updated, progress });
+  } catch (err) {
+    console.error('Update onboarding milestone error:', err);
+    res.status(500).json({ error: 'Unable to update onboarding milestone.' });
+  }
+});
+
+staffRouter.post('/onboarding/:id/complete', requirePrivilegedMfa, async (req: AuthRequest, res) => {
+  try {
+    if (isAuditorOnly(req) || !hasHrAuthority(req)) {
+      return res.status(403).json({ error: 'HR Officer or Super Admin authorisation required to finalise onboarding.' });
+    }
+    const checklistId = String(req.params.id);
+    const [tracker] = await db
+      .select()
+      .from(staffOnboardingChecklists)
+      .where(eq(staffOnboardingChecklists.id, checklistId))
+      .limit(1);
+    if (!tracker) return res.status(404).json({ error: 'Onboarding checklist not found.' });
+
+    if (tracker.userId && tracker.userId === req.authUser!.userId) {
+      return res.status(403).json({
+        error: 'Separation of duties enforced: you cannot approve final activation of your own onboarding.',
+      });
+    }
+
+    const readiness = isOnboardingReadyForActivation(tracker.milestonesJson);
+    if (!readiness.ready) {
+      return res.status(400).json({
+        error: `Cannot activate yet. Pending required milestones: ${readiness.missingTitles.join(', ')}`,
+      });
+    }
+
+    const now = new Date();
+    const updated = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(staffOnboardingChecklists)
+        .set({
+          overallStatus: 'COMPLETED',
+          completionPct: 100,
+          activatedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(staffOnboardingChecklists.id, tracker.id))
+        .returning();
+
+      if (tracker.staffProfileId) {
+        await tx
+          .update(staffEmployeeProfiles)
+          .set({ employmentStatus: 'ACTIVE', updatedAt: now })
+          .where(eq(staffEmployeeProfiles.id, tracker.staffProfileId));
+      }
+      if (tracker.applicationId) {
+        await tx
+          .update(recruitmentApplications)
+          .set({ stage: 'ACTIVE_EMPLOYEE', updatedAt: now })
+          .where(eq(recruitmentApplications.id, tracker.applicationId));
+      }
+
+      if (tracker.userId) {
+        await tx.insert(notifications).values({
+          userId: tracker.userId,
+          category: 'SYSTEM',
+          title: `Onboarding Complete — Active Staff Status (${tracker.jobId})`,
+          body: `All required documents, training modules, and credential checks for ${tracker.jobTitle} (${tracker.onboardingRef}) are verified. Your profile is now active.`,
+        });
+      }
+      return row;
+    });
+
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'STAFF_ONBOARDING_COMPLETED',
+      entityType: 'staff_onboarding_checklists',
+      entityId: tracker.id,
+      ip: req.ip,
+      details: { onboardingRef: tracker.onboardingRef, jobId: tracker.jobId },
+    });
+
+    res.json({ checklist: updated });
+  } catch (err) {
+    console.error('Complete onboarding error:', err);
+    res.status(500).json({ error: 'Unable to finalise onboarding.' });
   }
 });

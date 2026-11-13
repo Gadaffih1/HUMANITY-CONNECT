@@ -14,6 +14,12 @@ import {
   RECRUITMENT_STAGES,
   STAFF_EMPLOYMENT_STATUSES,
 } from '../types/domain.ts';
+import {
+  buildDefaultOnboardingMilestones,
+  canVerifyOnboardingMilestone,
+  computeOnboardingProgress,
+  isOnboardingReadyForActivation,
+} from './onboardingTracker.ts';
 
 test('Establishment contains all 170 unique positions across 15 departments with zero fake incumbents', () => {
   assert.equal(ORGANISATIONAL_DEPARTMENTS.length, 15);
@@ -110,4 +116,43 @@ test('RBAC permission preview enforces separation-of-duties rules #1, #7, #8 and
     'Monthly staff coordination meeting scheduled for Friday 10:00 EAT.'
   );
   assert.equal(safeMsg.allowed, true);
+});
+
+test('Automated Onboarding Tracker generates 3-track milestones, computes progress, and blocks self-verification', () => {
+  const milestones = buildDefaultOnboardingMilestones({
+    jobId: 'HC-FAP-045',
+    jobTitle: 'Senior Finance & Compliance Accountant',
+    department: 'Finance, Accounting & Resource Stewardship',
+    requiredQualifications: 'BCom Accounting / CPA(K)',
+    professionalQualifications: 'ICPAK Practising Member in Good Standing',
+    safeguardingResponsibilities: 'Financial integrity and zero-tolerance safeguarding charter.',
+    applicationDocsVerified: true,
+    backgroundCleared: true,
+  });
+
+  assert.equal(milestones.length, 10);
+  const initial = computeOnboardingProgress(milestones, false);
+  // 1 of 10 (CRED_BACKGROUND_SECURITY) carried forward as VERIFIED -> 10% IN_PROGRESS
+  assert.equal(initial.completionPct, 10);
+  assert.equal(initial.overallStatus, 'IN_PROGRESS');
+  assert.equal(initial.tracks.DOCUMENT_SUBMISSION.totalCount, 4);
+  assert.equal(initial.tracks.TRAINING_COMPLETION.totalCount, 3);
+  assert.equal(initial.tracks.CREDENTIAL_VERIFICATION.completedCount, 1);
+
+  // Self-verification blocked; independent verifier permitted
+  assert.equal(canVerifyOnboardingMilestone('user-1', 'user-1').allowed, false);
+  assert.equal(canVerifyOnboardingMilestone('hr-admin-2', 'user-1').allowed, true);
+
+  // Rejecting one item automatically sets BLOCKED
+  const withReject = milestones.map((m, idx) =>
+    idx === 0 ? { ...m, status: 'REJECTED' as const } : m
+  );
+  assert.equal(computeOnboardingProgress(withReject, false).overallStatus, 'BLOCKED');
+
+  // Verifying all required milestones marks READY_FOR_ACTIVATION & 100%
+  const allVerified = milestones.map((m) => ({ ...m, status: 'VERIFIED' as const }));
+  const doneProgress = computeOnboardingProgress(allVerified, false);
+  assert.equal(doneProgress.completionPct, 100);
+  assert.equal(doneProgress.overallStatus, 'READY_FOR_ACTIVATION');
+  assert.equal(isOnboardingReadyForActivation(allVerified).ready, true);
 });

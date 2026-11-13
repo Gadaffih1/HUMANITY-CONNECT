@@ -1384,6 +1384,59 @@ export const internalStaffMessages = pgTable(
   (t) => [index('idx_internal_msgs_type_dept').on(t.channelType, t.departmentNumber)]
 );
 
+// 51. Automated Staff Onboarding Progress Checklists (Documents, Training, Credential Verification)
+export const staffOnboardingChecklists = pgTable(
+  'staff_onboarding_checklists',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    onboardingRef: text('onboarding_ref').notNull().unique(),
+    applicationId: uuid('application_id').references(() => recruitmentApplications.id, {
+      onDelete: 'set null',
+    }),
+    staffProfileId: uuid('staff_profile_id').references(() => staffEmployeeProfiles.id, {
+      onDelete: 'set null',
+    }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    jobId: text('job_id').notNull(),
+    departmentNumber: integer('department_number').notNull(),
+    department: text('department').notNull(),
+    jobTitle: text('job_title').notNull(),
+    newHireNameEnc: text('new_hire_name_enc').notNull(),
+    newHireEmailEnc: text('new_hire_email_enc').notNull(),
+    overallStatus: text('overall_status').notNull().default('NOT_STARTED'),
+    // NOT_STARTED | IN_PROGRESS | BLOCKED | READY_FOR_ACTIVATION | COMPLETED
+    completionPct: integer('completion_pct').notNull().default(0),
+    dueDate: text('due_date'),
+    milestonesJson: jsonb('milestones_json')
+      .$type<
+        Array<{
+          code: string;
+          category: 'DOCUMENT_SUBMISSION' | 'TRAINING_COMPLETION' | 'CREDENTIAL_VERIFICATION';
+          title: string;
+          description: string;
+          required: boolean;
+          status: 'PENDING' | 'SUBMITTED' | 'VERIFIED' | 'WAIVED' | 'REJECTED';
+          evidenceRef?: string;
+          notes?: string;
+          submittedAt?: string;
+          verifiedAt?: string;
+          verifiedByName?: string;
+          verifiedByUserId?: string;
+        }>
+      >()
+      .notNull()
+      .default([]),
+    activatedAt: timestamp('activated_at', { withTimezone: true }),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('idx_onboarding_status_dept').on(t.overallStatus, t.departmentNumber),
+    index('idx_onboarding_profile').on(t.staffProfileId),
+  ]
+);
+
 // Drizzle Relations
 export const usersRelations = relations(users, ({ many, one }) => ({
   userRoles: many(userRoles),
