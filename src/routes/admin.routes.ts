@@ -26,7 +26,7 @@ import {
   requireRole,
   requireAnyAdminOrPermission,
   requirePrivilegedMfa,
-  AuthRequest,
+  type AuthRequest,
   writeAuditLog,
 } from '../middleware/auth.ts';
 import { decryptSensitiveText, encryptSensitiveText, hashPassword } from '../lib/crypto.ts';

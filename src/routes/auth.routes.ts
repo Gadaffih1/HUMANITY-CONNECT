@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import { eq, and, desc, isNull, gt } from 'drizzle-orm';
+import { eq, and, desc, isNull, gt, ne } from 'drizzle-orm';
 import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import {
   users,
@@ -50,22 +50,34 @@ const SELF_ASSIGNABLE_ROLES: RoleCode[] = [
   'WELL_WISHER',
 ];
 
+const optionalTrimmedString = (max: number) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : typeof v === 'string' ? v.trim() : v),
+    z.string().max(max).optional()
+  );
+
 const registerSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
-  fullName: z.string().min(2).max(120),
-  phoneE164: z.string().min(8).max(20).optional(),
-  countryCode: z.string().length(2).default('KE'),
-  selectedRoles: z.array(z.string()).length(1),
-  county: z.string().min(2).max(80).default('Nairobi'),
-  subCounty: z.string().max(80).optional(),
-  ward: z.string().max(80).optional(),
-  displayAlias: z.string().min(2).max(100).optional(),
-  vulnerabilitySummary: z.string().max(1000).optional(),
-  guardianOrgName: z.string().max(140).optional(),
-  guardianRelationship: z.string().max(80).optional(),
+  email: z.string().trim().email('Please enter a valid email address.'),
+  password: z.string().min(8, 'Password must be at least 8 characters long.'),
+  fullName: z.string().trim().min(2, 'Full name must be at least 2 characters.').max(120),
+  phoneE164: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : typeof v === 'string' ? v.trim() : v),
+    z.string().min(8, 'Enter a valid Kenyan mobile number (e.g. +254712345678 or 0712345678).').max(30).optional()
+  ),
+  countryCode: z.string().trim().length(2).default('KE'),
+  selectedRoles: z.array(z.string()).length(1, 'Select exactly one account category.'),
+  county: z.string().trim().min(2).max(80).default('Nairobi'),
+  subCounty: optionalTrimmedString(80),
+  ward: optionalTrimmedString(80),
+  displayAlias: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : typeof v === 'string' ? v.trim() : v),
+    z.string().min(2).max(100).optional()
+  ),
+  vulnerabilitySummary: optionalTrimmedString(1000),
+  guardianOrgName: optionalTrimmedString(140),
+  guardianRelationship: optionalTrimmedString(80),
   isMinorCase: z.boolean().optional(),
-  organisationName: z.string().max(140).optional(),
+  organisationName: optionalTrimmedString(140),
   supporterType: z.enum(['SUPPORTIVE', 'WELL_WISHER', 'CORPORATE']).optional(),
 });
 
@@ -79,7 +91,13 @@ authRouter.post('/register', async (req, res) => {
   try {
     const parsed = registerSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: 'Invalid registration details', details: parsed.error.flatten() });
+      const flat = parsed.error.flatten();
+      const firstFieldMsg = Object.values(flat.fieldErrors).flat()[0];
+      const msg =
+        firstFieldMsg ||
+        flat.formErrors[0] ||
+        'Invalid registration details. Please check your entries.';
+      return res.status(400).json({ error: msg, details: flat });
     }
     const data = parsed.data;
     const normalizedEmail = data.email.trim().toLowerCase();
@@ -94,138 +112,208 @@ authRouter.post('/register', async (req, res) => {
       });
     }
 
-    const [existing] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.email, normalizedEmail))
-      .limit(1);
-    if (existing) {
-      return res.status(409).json({ error: 'An account with this email already exists.' });
-    }
-
     const normalizedPhone = data.phoneE164?.trim()
       ? normalizeKenyanMsisdn(data.phoneE164.trim())
       : null;
     if (normalizedPhone && !normalizedPhone.ok) {
-      return res.status(400).json({ error: normalizedPhone.error || 'Invalid Kenyan phone format.' });
+      return res.status(400).json({
+        error: normalizedPhone.error || 'Invalid Kenyan phone format (use +2547XXXXXXXX or 07XXXXXXXX).',
+      });
+    }
+
+    const [existingEmail] = await withDbRetry(() =>
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, normalizedEmail))
+        .limit(1)
+    );
+    if (existingEmail) {
+      return res.status(409).json({ error: 'An account with this email already exists.' });
+    }
+
+    if (normalizedPhone?.ok) {
+      const [existingPhone] = await withDbRetry(() =>
+        db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.phoneE164, normalizedPhone.e164))
+          .limit(1)
+      );
+      if (existingPhone) {
+        return res.status(409).json({
+          error: 'An account with this phone number is already registered. Please sign in instead.',
+        });
+      }
     }
 
     const passwordHash = await hashPassword(data.password);
-    const [newUser] = await db
-      .insert(users)
-      .values({
-        email: normalizedEmail,
-        fullName: data.fullName.trim(),
-        phoneE164: normalizedPhone?.ok ? normalizedPhone.e164 : null,
-        passwordHash,
-        countryCode: data.countryCode,
-        approvalStatus: 'ACTIVE',
-      })
-      .returning();
+    const sessionId = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const emailOtp = generateNumericOtp(6);
+    const phoneOtp = normalizedPhone?.ok ? generateNumericOtp(6) : undefined;
 
-    for (const rCode of validRoles) {
-      const [roleRow] = await db.select().from(roles).where(eq(roles.code, rCode)).limit(1);
-      if (roleRow) {
-        await db.insert(userRoles).values({
-          userId: newUser.id,
+    const { newUser, token } = await db.transaction(async (tx) => {
+      const [insertedUser] = await tx
+        .insert(users)
+        .values({
+          email: normalizedEmail,
+          fullName: data.fullName.trim(),
+          phoneE164: normalizedPhone?.ok ? normalizedPhone.e164 : null,
+          passwordHash,
+          countryCode: data.countryCode.toUpperCase(),
+          approvalStatus: 'ACTIVE',
+        })
+        .returning();
+
+      for (const rCode of validRoles) {
+        let [roleRow] = await tx.select().from(roles).where(eq(roles.code, rCode)).limit(1);
+        if (!roleRow) {
+          const isBen = ['ORPHAN_GUARDIAN', 'DESTITUTE', 'NEEDY'].includes(rCode);
+          const [createdRole] = await tx
+            .insert(roles)
+            .values({
+              code: rCode,
+              name: rCode.replace(/_/g, ' '),
+              description: 'Platform account category',
+              isBeneficiaryRole: isBen,
+              isPrivileged: false,
+              requiresMfa: false,
+              selfAssignable: true,
+            })
+            .onConflictDoNothing({ target: roles.code })
+            .returning();
+          roleRow =
+            createdRole ||
+            (await tx.select().from(roles).where(eq(roles.code, rCode)).limit(1))[0];
+        }
+        if (!roleRow) {
+          throw new Error(`Unable to assign account category (${rCode}). Please contact support.`);
+        }
+        await tx.insert(userRoles).values({
+          userId: insertedUser.id,
           roleId: roleRow.id,
           status: 'ACTIVE',
         });
       }
-    }
 
-    // Create beneficiary profile if any beneficiary classification selected
-    const beneficiaryRole = validRoles.find((r) =>
-      ['ORPHAN_GUARDIAN', 'DESTITUTE', 'NEEDY'].includes(r)
-    );
-    if (beneficiaryRole) {
-      const refCode = generateReferenceCode('HC');
-      const [bp] = await db
-        .insert(beneficiaryProfiles)
-        .values({
-          userId: newUser.id,
-          referenceCode: refCode,
-          classification: beneficiaryRole,
-          displayAlias:
-            data.displayAlias?.trim() ||
-            `${data.county} ${beneficiaryRole === 'ORPHAN_GUARDIAN' ? 'Guardian Case' : 'Household'} #${refCode.slice(-4)}`,
-          countryCode: data.countryCode,
-          county: data.county,
-          subCounty: data.subCounty || null,
-          ward: data.ward || null,
-          guardianOrgName: data.guardianOrgName || null,
-          isMinorCase: beneficiaryRole === 'ORPHAN_GUARDIAN' ? (data.isMinorCase ?? true) : false,
-          vulnerabilitySummary:
-            data.vulnerabilitySummary?.trim() ||
-            'Initial intake submitted pending V1–V4 verification review.',
-          verificationLevel: 'V0',
-          verificationStatus: 'INTAKE_SUBMITTED',
-          safeguardingCleared: false,
-          publicListingApproved: false,
-        })
-        .returning();
+      // Create beneficiary profile if any beneficiary classification selected
+      const beneficiaryRole = validRoles.find((r) =>
+        ['ORPHAN_GUARDIAN', 'DESTITUTE', 'NEEDY'].includes(r)
+      );
+      if (beneficiaryRole) {
+        const refCode = generateReferenceCode('HC');
+        const [bp] = await tx
+          .insert(beneficiaryProfiles)
+          .values({
+            userId: insertedUser.id,
+            referenceCode: refCode,
+            classification: beneficiaryRole,
+            displayAlias:
+              data.displayAlias ||
+              `${data.county} ${beneficiaryRole === 'ORPHAN_GUARDIAN' ? 'Guardian Case' : 'Household'} #${refCode.slice(-4)}`,
+            countryCode: data.countryCode.toUpperCase(),
+            county: data.county,
+            subCounty: data.subCounty || null,
+            ward: data.ward || null,
+            guardianOrgName: data.guardianOrgName || null,
+            isMinorCase: beneficiaryRole === 'ORPHAN_GUARDIAN' ? (data.isMinorCase ?? true) : false,
+            vulnerabilitySummary:
+              data.vulnerabilitySummary ||
+              'Initial intake submitted pending V1–V4 verification review.',
+            verificationLevel: 'V0',
+            verificationStatus: 'INTAKE_SUBMITTED',
+            safeguardingCleared: false,
+            publicListingApproved: false,
+          })
+          .returning();
 
-      await db.insert(verificationCases).values({
-        caseNumber: `VC-${refCode}`,
-        beneficiaryId: bp.id,
-        officerWorkspace:
-          beneficiaryRole === 'ORPHAN_GUARDIAN' ? 'SOCIAL_WELFARE_OFFICER' : 'VERIFICATION_OFFICER',
-        verificationLevel: 'V0',
-        stage: 'DOCUMENT_REVIEW',
-        fieldCounty: data.county,
-        caseDeadlineAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      });
-
-      if (beneficiaryRole === 'ORPHAN_GUARDIAN') {
-        await db.insert(guardianRelationships).values({
+        await tx.insert(verificationCases).values({
+          caseNumber: `VC-${refCode}`,
           beneficiaryId: bp.id,
-          guardianUserId: newUser.id,
-          relationshipType: data.guardianRelationship || data.guardianOrgName || 'Verified Legal Guardian',
-          legalDocVerified: false,
-          consentAuthority: true,
+          officerWorkspace:
+            beneficiaryRole === 'ORPHAN_GUARDIAN' ? 'SOCIAL_WELFARE_OFFICER' : 'VERIFICATION_OFFICER',
+          verificationLevel: 'V0',
+          stage: 'DOCUMENT_REVIEW',
+          fieldCounty: data.county,
+          caseDeadlineAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        });
+
+        if (beneficiaryRole === 'ORPHAN_GUARDIAN') {
+          await tx.insert(guardianRelationships).values({
+            beneficiaryId: bp.id,
+            guardianUserId: insertedUser.id,
+            relationshipType: data.guardianRelationship || data.guardianOrgName || 'Verified Legal Guardian',
+            legalDocVerified: false,
+            consentAuthority: true,
+          });
+        }
+
+        await tx.insert(consentRecords).values({
+          beneficiaryId: bp.id,
+          grantedByUserId: insertedUser.id,
+          consentScope: 'DATA_PROCESSING',
+          granted: true,
         });
       }
 
-      await db.insert(consentRecords).values({
-        beneficiaryId: bp.id,
-        grantedByUserId: newUser.id,
-        consentScope: 'DATA_PROCESSING',
-        granted: true,
-      });
-    }
+      // Create supporter profile if Supportive or Well Wisher selected
+      const supporterRole = validRoles.find((r) => ['SUPPORTIVE', 'WELL_WISHER'].includes(r));
+      if (supporterRole) {
+        await tx.insert(supporterProfiles).values({
+          userId: insertedUser.id,
+          supporterType: data.supporterType || supporterRole,
+          displayName: data.organisationName || data.fullName.trim(),
+          preferredCurrency: data.countryCode.toUpperCase() === 'KE' ? 'KES' : 'USD',
+        });
+      }
 
-    // Create supporter profile if Supportive or Well Wisher selected
-    const supporterRole = validRoles.find((r) => ['SUPPORTIVE', 'WELL_WISHER'].includes(r));
-    if (supporterRole) {
-      await db.insert(supporterProfiles).values({
-        userId: newUser.id,
-        supporterType: data.supporterType || supporterRole,
-        displayName: data.organisationName?.trim() || data.fullName.trim(),
-        preferredCurrency: data.countryCode === 'KE' ? 'KES' : 'USD',
+      // Issue Email & Phone OTP verification tokens
+      await tx.insert(verificationTokens).values({
+        userId: insertedUser.id,
+        channel: 'EMAIL_VERIFY',
+        target: normalizedEmail,
+        codeHash: sha256Hex(emailOtp),
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
       });
-    }
 
-    // Issue Email & Phone OTP verification tokens
-    const emailOtp = generateNumericOtp(6);
-    await db.insert(verificationTokens).values({
-      userId: newUser.id,
-      channel: 'EMAIL_VERIFY',
-      target: normalizedEmail,
-      codeHash: sha256Hex(emailOtp),
-      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      if (insertedUser.phoneE164 && phoneOtp) {
+        await tx.insert(verificationTokens).values({
+          userId: insertedUser.id,
+          channel: 'PHONE_OTP',
+          target: insertedUser.phoneE164,
+          codeHash: sha256Hex(phoneOtp),
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+        });
+      }
+
+      const signedToken = signSessionToken({
+        sid: sessionId,
+        uid: insertedUser.id,
+        exp: expiresAt.getTime(),
+      });
+      await tx.insert(userSessions).values({
+        id: sessionId,
+        userId: insertedUser.id,
+        tokenHash: sha256Hex(signedToken),
+        deviceLabel: (req.headers['user-agent'] || 'Web Browser').slice(0, 60),
+        userAgent: req.headers['user-agent'] || null,
+        ipHash: req.ip ? sha256Hex(req.ip) : null,
+        activeRoleCode: validRoles[0],
+        expiresAt,
+      });
+
+      await tx.insert(notifications).values({
+        userId: insertedUser.id,
+        category: 'SYSTEM',
+        title: 'Welcome to Humanity Connect',
+        body: 'Your account is active. Complete email and phone verification to unlock full portal actions.',
+      });
+
+      return { newUser: insertedUser, token: signedToken };
     });
 
-    let phoneOtpPreview: string | undefined;
-    if (newUser.phoneE164) {
-      const phoneOtp = generateNumericOtp(6);
-      phoneOtpPreview = phoneOtp;
-      await db.insert(verificationTokens).values({
-        userId: newUser.id,
-        channel: 'PHONE_OTP',
-        target: newUser.phoneE164,
-        codeHash: sha256Hex(phoneOtp),
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-      });
+    if (newUser.phoneE164 && phoneOtp) {
       await dispatchTalksasaSms({
         recipientPhone: newUser.phoneE164,
         message: `Humanity Connect verification code: ${phoneOtp}. Expires in 15 minutes. Do not share this code.`,
@@ -235,28 +323,6 @@ authRouter.post('/register', async (req, res) => {
       }).catch((smsErr) => console.error('TalkSasa registration OTP dispatch error:', smsErr));
     }
 
-    // Create initial session
-    const sessionId = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const token = signSessionToken({ sid: sessionId, uid: newUser.id, exp: expiresAt.getTime() });
-    await db.insert(userSessions).values({
-      id: sessionId,
-      userId: newUser.id,
-      tokenHash: sha256Hex(token),
-      deviceLabel: (req.headers['user-agent'] || 'Web Browser').slice(0, 60),
-      userAgent: req.headers['user-agent'] || null,
-      ipHash: req.ip ? sha256Hex(req.ip) : null,
-      activeRoleCode: validRoles[0],
-      expiresAt,
-    });
-
-    await db.insert(notifications).values({
-      userId: newUser.id,
-      category: 'SYSTEM',
-      title: 'Welcome to Humanity Connect',
-      body: 'Your account is active. Complete email and phone verification to unlock full portal actions.',
-    });
-
     await writeAuditLog({
       actorUserId: newUser.id,
       actorRole: validRoles[0],
@@ -264,7 +330,7 @@ authRouter.post('/register', async (req, res) => {
       entityType: 'users',
       entityId: newUser.id,
       ip: req.ip,
-      details: { roles: validRoles, countryCode: data.countryCode },
+      details: { roles: validRoles, countryCode: data.countryCode.toUpperCase() },
     });
 
     const authUser = await loadUserAuthContext(newUser.id, validRoles[0], false, sessionId);
@@ -274,11 +340,25 @@ authRouter.post('/register', async (req, res) => {
       user: authUser,
       verificationHints: {
         emailCodeIssued: true,
-        phoneOtpIssued: Boolean(phoneOtpPreview),
+        phoneOtpIssued: Boolean(phoneOtp),
       },
     });
   } catch (err: any) {
     console.error('Register error:', err);
+    if (err?.code === '23505') {
+      const detail = String(err?.detail || err?.constraint || '').toLowerCase();
+      if (detail.includes('phone')) {
+        return res.status(409).json({
+          error: 'An account with this phone number already exists.',
+        });
+      }
+      return res.status(409).json({ error: 'An account with these details already exists.' });
+    }
+    if (isTransientDbError(err)) {
+      return res.status(503).json({
+        error: 'Database service temporarily busy. Please retry registration shortly.',
+      });
+    }
     res.status(500).json({ error: err.message || 'Registration failed' });
   }
 });
@@ -453,6 +533,17 @@ authRouter.post('/verify-phone/send', requireAuth, async (req: AuthRequest, res)
   if (!norm.ok) {
     return res.status(400).json({
       error: norm.error || 'Valid phone number (e.g. +2547XXXXXXXX or 07XXXXXXXX) is required.',
+    });
+  }
+
+  const [phoneInUse] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.phoneE164, norm.e164), ne(users.id, req.authUser!.userId)))
+    .limit(1);
+  if (phoneInUse) {
+    return res.status(409).json({
+      error: 'This phone number is already linked to another Humanity Connect account.',
     });
   }
 

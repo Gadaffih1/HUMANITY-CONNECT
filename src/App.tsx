@@ -311,6 +311,7 @@ const HumanityConnectShell: React.FC = () => {
           </div>
         ) : route === 'auth' ? (
           <AuthScreens
+            key={`${authMode}-${presetRole}`}
             initialMode={authMode}
             presetRole={presetRole}
             onSuccess={() => setRoute('portal')}

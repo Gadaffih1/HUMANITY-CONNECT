@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   KeyRound,
   Smartphone,
@@ -10,22 +10,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { GlossyButton } from '../ui/DesignSystem';
-import { ROLE_DEFINITIONS, type RoleCode } from '../../types/domain';
-
-const KENYA_COUNTIES = [
-  'Nairobi',
-  'Nakuru',
-  'Kisumu',
-  'Mombasa',
-  'Kiambu',
-  'Kilifi',
-  'Kajiado',
-  'Uasin Gishu',
-  'Machakos',
-  'Turkana',
-  'Kitui',
-  'Kakamega',
-];
+import { KENYAN_47_COUNTIES, ROLE_DEFINITIONS, type RoleCode } from '../../types/domain';
+import { normalizeKenyanMsisdn } from '../../lib/talksasaUtils';
 
 const REGISTERABLE_ROLES: RoleCode[] = [
   'ORPHAN_GUARDIAN',
@@ -55,7 +41,7 @@ export const AuthScreens: React.FC<{
   ]);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
-  const [phoneE164, setPhoneE164] = useState('+2547');
+  const [phoneE164, setPhoneE164] = useState('');
   const [password, setPassword] = useState('');
   const [county, setCounty] = useState('Nairobi');
   const [subCounty, setSubCounty] = useState('');
@@ -71,8 +57,20 @@ export const AuthScreens: React.FC<{
   const [resetRequested, setResetRequested] = useState(false);
   const [sandboxHint, setSandboxHint] = useState<string | null>(null);
 
+  useEffect(() => {
+    setMode(initialMode);
+    setFeedback(null);
+  }, [initialMode]);
+
+  useEffect(() => {
+    if (REGISTERABLE_ROLES.includes(presetRole as RoleCode)) {
+      setSelectedRoles([presetRole as RoleCode]);
+    }
+  }, [presetRole]);
+
   const selectRole = (code: RoleCode) => {
     setSelectedRoles([code]);
+    setFeedback(null);
   };
 
   const isOrphanSelected = selectedRoles.includes('ORPHAN_GUARDIAN');
@@ -110,24 +108,53 @@ export const AuthScreens: React.FC<{
 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setBusy(true);
     setFeedback(null);
+
+    const trimmedName = fullName.trim();
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedPhone = phoneE164.trim();
+
+    if (trimmedName.length < 2) {
+      setFeedback({ type: 'error', text: 'Please enter your full name (at least 2 characters).' });
+      return;
+    }
+    const phoneCheck = normalizeKenyanMsisdn(trimmedPhone);
+    if (!phoneCheck.ok) {
+      setFeedback({
+        type: 'error',
+        text: phoneCheck.error || 'Enter a valid Kenyan phone number (e.g. +254712345678 or 0712345678).',
+      });
+      return;
+    }
+    if (password.length < 8) {
+      setFeedback({ type: 'error', text: 'Password must be at least 8 characters long.' });
+      return;
+    }
+    if (isOrphanSelected && !guardianRelationship.trim()) {
+      setFeedback({
+        type: 'error',
+        text: 'Please specify the guardian relationship or welfare authority.',
+      });
+      return;
+    }
+
+    setBusy(true);
     try {
       await registerAccount({
-        email,
+        email: trimmedEmail,
         password,
-        fullName,
-        phoneE164,
+        fullName: trimmedName,
+        phoneE164: phoneCheck.e164,
         countryCode: 'KE',
         selectedRoles,
         county,
-        subCounty,
-        guardianOrgName: isOrphanSelected ? guardianOrgName : undefined,
-        guardianRelationship: isOrphanSelected ? guardianRelationship : undefined,
+        subCounty: subCounty.trim() || undefined,
+        guardianOrgName: isOrphanSelected ? guardianOrgName.trim() || undefined : undefined,
+        guardianRelationship: isOrphanSelected ? guardianRelationship.trim() || undefined : undefined,
         isMinorCase: isOrphanSelected,
-        organisationName: isWellWisherSelected ? organisationName : undefined,
+        organisationName: isWellWisherSelected ? organisationName.trim() || undefined : undefined,
         supporterType: isWellWisherSelected ? 'WELL_WISHER' : 'SUPPORTIVE',
-        vulnerabilitySummary: isBeneficiarySelected ? vulnerabilitySummary : undefined,
+        vulnerabilitySummary: isBeneficiarySelected ? vulnerabilitySummary.trim() || undefined : undefined,
       });
       onSuccess();
     } catch (err: any) {
@@ -393,7 +420,7 @@ export const AuthScreens: React.FC<{
                     onChange={(e) => setCounty(e.target.value)}
                     className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
                   >
-                    {KENYA_COUNTIES.map((c) => (
+                    {KENYAN_47_COUNTIES.map((c) => (
                       <option key={c} value={c}>{c}</option>
                     ))}
                   </select>
@@ -536,12 +563,12 @@ export const AccountSecurityPanel: React.FC = () => {
     revokedAt: string | null;
     isCurrent: boolean;
   }>>([]);
-  const [phoneInput, setPhoneInput] = useState(user?.phoneE164 || '+2547');
+  const [phoneInput, setPhoneInput] = useState(user?.phoneE164 || '');
   const [phoneOtp, setPhoneOtp] = useState('');
   const [emailCode, setEmailCode] = useState('');
   const [mfaSetupSecret, setMfaSetupSecret] = useState<string | null>(null);
   const [mfaCode, setMfaCode] = useState('');
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const loadSessions = async () => {
     const data = await apiFetch<{ sessions: typeof sessions }>('/api/auth/sessions');
@@ -555,8 +582,14 @@ export const AccountSecurityPanel: React.FC = () => {
   return (
     <div className="space-y-6">
       {msg && (
-        <div className="p-3.5 rounded-xl bg-[#287A59]/10 border border-[#287A59]/25 text-sm text-[#287A59]">
-          {msg}
+        <div
+          className={`p-3.5 rounded-xl border text-sm ${
+            msg.type === 'error'
+              ? 'bg-[#9F2D20]/10 border-[#9F2D20]/25 text-[#9F2D20]'
+              : 'bg-[#287A59]/10 border-[#287A59]/25 text-[#287A59]'
+          }`}
+        >
+          {msg.text}
         </div>
       )}
 
@@ -576,17 +609,28 @@ export const AccountSecurityPanel: React.FC = () => {
               type="tel"
               value={phoneInput}
               onChange={(e) => setPhoneInput(e.target.value)}
+              placeholder="+254712345678 or 0712345678"
               className="flex-1 px-3 py-2 text-sm rounded-xl bg-white border border-[#102E36]/15"
             />
             <GlossyButton
               size="sm"
               variant="ivory"
               onClick={async () => {
-                const res = await apiFetch<{ sandboxOtp?: string }>('/api/auth/verify-phone/send', {
-                  method: 'POST',
-                  body: JSON.stringify({ phoneE164: phoneInput }),
-                });
-                setMsg(res.sandboxOtp ? `Phone OTP sent (sandbox code: ${res.sandboxOtp})` : 'Phone OTP sent.');
+                setMsg(null);
+                try {
+                  const res = await apiFetch<{ sandboxOtp?: string }>('/api/auth/verify-phone/send', {
+                    method: 'POST',
+                    body: JSON.stringify({ phoneE164: phoneInput }),
+                  });
+                  setMsg({
+                    type: 'success',
+                    text: res.sandboxOtp
+                      ? `Phone OTP sent (sandbox code: ${res.sandboxOtp})`
+                      : 'Phone OTP sent.',
+                  });
+                } catch (err: any) {
+                  setMsg({ type: 'error', text: err.message || 'Unable to send phone OTP.' });
+                }
               }}
             >
               Send OTP
@@ -604,12 +648,17 @@ export const AccountSecurityPanel: React.FC = () => {
               size="sm"
               variant="green"
               onClick={async () => {
-                await apiFetch('/api/auth/verify-phone/confirm', {
-                  method: 'POST',
-                  body: JSON.stringify({ code: phoneOtp }),
-                });
-                await refreshUser();
-                setMsg('Phone number verified.');
+                setMsg(null);
+                try {
+                  await apiFetch('/api/auth/verify-phone/confirm', {
+                    method: 'POST',
+                    body: JSON.stringify({ code: phoneOtp }),
+                  });
+                  await refreshUser();
+                  setMsg({ type: 'success', text: 'Phone number verified.' });
+                } catch (err: any) {
+                  setMsg({ type: 'error', text: err.message || 'Phone verification failed.' });
+                }
               }}
             >
               Verify Phone
@@ -627,10 +676,20 @@ export const AccountSecurityPanel: React.FC = () => {
               size="sm"
               variant="ivory"
               onClick={async () => {
-                const res = await apiFetch<{ sandboxCode?: string }>('/api/auth/verify-email/send', {
-                  method: 'POST',
-                });
-                setMsg(res.sandboxCode ? `Email code issued (sandbox: ${res.sandboxCode})` : 'Email sent.');
+                setMsg(null);
+                try {
+                  const res = await apiFetch<{ sandboxCode?: string }>('/api/auth/verify-email/send', {
+                    method: 'POST',
+                  });
+                  setMsg({
+                    type: 'success',
+                    text: res.sandboxCode
+                      ? `Email code issued (sandbox: ${res.sandboxCode})`
+                      : 'Email sent.',
+                  });
+                } catch (err: any) {
+                  setMsg({ type: 'error', text: err.message || 'Unable to send email code.' });
+                }
               }}
             >
               Send
@@ -639,12 +698,17 @@ export const AccountSecurityPanel: React.FC = () => {
               size="sm"
               variant="teal"
               onClick={async () => {
-                await apiFetch('/api/auth/verify-email/confirm', {
-                  method: 'POST',
-                  body: JSON.stringify({ code: emailCode }),
-                });
-                await refreshUser();
-                setMsg('Email verified.');
+                setMsg(null);
+                try {
+                  await apiFetch('/api/auth/verify-email/confirm', {
+                    method: 'POST',
+                    body: JSON.stringify({ code: emailCode }),
+                  });
+                  await refreshUser();
+                  setMsg({ type: 'success', text: 'Email verified.' });
+                } catch (err: any) {
+                  setMsg({ type: 'error', text: err.message || 'Email verification failed.' });
+                }
               }}
             >
               Confirm
@@ -666,13 +730,21 @@ export const AccountSecurityPanel: React.FC = () => {
             size="sm"
             variant="teal"
             onClick={async () => {
-              const res = await apiFetch<{ secret: string; currentVerificationHint?: string }>(
-                '/api/auth/mfa/setup',
-                { method: 'POST' }
-              );
-              setMfaSetupSecret(res.secret);
-              if (res.currentVerificationHint) {
-                setMsg(`TOTP secret initialized. Current authenticator code: ${res.currentVerificationHint}`);
+              setMsg(null);
+              try {
+                const res = await apiFetch<{ secret: string; currentVerificationHint?: string }>(
+                  '/api/auth/mfa/setup',
+                  { method: 'POST' }
+                );
+                setMfaSetupSecret(res.secret);
+                if (res.currentVerificationHint) {
+                  setMsg({
+                    type: 'success',
+                    text: `TOTP secret initialized. Current authenticator code: ${res.currentVerificationHint}`,
+                  });
+                }
+              } catch (err: any) {
+                setMsg({ type: 'error', text: err.message || 'MFA initialization failed.' });
               }
             }}
           >
@@ -695,12 +767,17 @@ export const AccountSecurityPanel: React.FC = () => {
               size="sm"
               variant="gold"
               onClick={async () => {
-                await apiFetch('/api/auth/mfa/verify', {
-                  method: 'POST',
-                  body: JSON.stringify({ code: mfaCode }),
-                });
-                await refreshUser();
-                setMsg('MFA verified for active session.');
+                setMsg(null);
+                try {
+                  await apiFetch('/api/auth/mfa/verify', {
+                    method: 'POST',
+                    body: JSON.stringify({ code: mfaCode }),
+                  });
+                  await refreshUser();
+                  setMsg({ type: 'success', text: 'MFA verified for active session.' });
+                } catch (err: any) {
+                  setMsg({ type: 'error', text: err.message || 'MFA verification failed.' });
+                }
               }}
             >
               Verify MFA
