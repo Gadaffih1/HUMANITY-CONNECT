@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
+import { googleSignInError } from '../lib/googleAuthError';
 import type { AuthUserSummary, RoleCode } from '../types/domain';
 
 interface AuthContextValue {
@@ -89,7 +90,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithGoogle = async () => {
     setError(null);
-    const cred = await signInWithPopup(auth, googleAuthProvider);
+    let cred;
+    try {
+      cred = await signInWithPopup(auth, googleAuthProvider);
+    } catch (err) {
+      throw googleSignInError(err, window.location.hostname);
+    }
     const idToken = await cred.user.getIdToken();
     setToken(idToken);
     const data = await apiFetchWithToken<{ user: AuthUserSummary }>('/api/auth/me', idToken);
