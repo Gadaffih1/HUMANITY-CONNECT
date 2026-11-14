@@ -19,6 +19,9 @@ import {
   KeyRound,
   MessageSquare,
   Send,
+  Search,
+  Phone,
+  Mail,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -55,7 +58,8 @@ type AdminTab =
   | 'empowerment'
   | 'field-ops'
   | 'staff-centre'
-  | 'governance';
+  | 'governance'
+  | 'accounts';
 
 export const AdminVerificationPortal: React.FC = () => {
   const { apiFetch, user, token } = useAuth();
@@ -148,6 +152,34 @@ export const AdminVerificationPortal: React.FC = () => {
   const [permAuthReason, setPermAuthReason] = useState('');
   const [permBusy, setPermBusy] = useState(false);
 
+  // Super Admin Registered Accounts Directory State
+  const [usersDirectory, setUsersDirectory] = useState<{
+    totalCount: number;
+    users: Array<{
+      id: string;
+      fullName: string;
+      email: string;
+      phoneE164?: string | null;
+      countryCode: string;
+      county?: string | null;
+      subCounty?: string | null;
+      ward?: string | null;
+      approvalStatus: string;
+      emailVerified: boolean;
+      phoneVerified: boolean;
+      mfaEnabled: boolean;
+      lastLoginAt?: string | null;
+      createdAt: string;
+      roles: string[];
+      beneficiaryClassification?: string | null;
+      beneficiaryRef?: string | null;
+    }>;
+  } | null>(null);
+  const [dirSearch, setDirSearch] = useState('');
+  const [dirCountyFilter, setDirCountyFilter] = useState('ALL');
+  const [dirRoleFilter, setDirRoleFilter] = useState('ALL');
+  const [dirRefreshing, setDirRefreshing] = useState(false);
+
   const loadOffline = async () => {
     const items = await listEncryptedOfflineRecords(token);
     setOfflineRecords(items);
@@ -156,7 +188,8 @@ export const AdminVerificationPortal: React.FC = () => {
   const loadAll = async () => {
     setErrorMsg(null);
     try {
-      const [ov, rep, guide, emp, proj, comm, ts] = await Promise.all([
+      const isSuperAdmin = Boolean(user?.roles.includes('SUPER_ADMIN'));
+      const [ov, rep, guide, emp, proj, comm, ts, dir] = await Promise.all([
         apiFetch<any>('/api/admin/overview'),
         apiFetch<any>('/api/payments/reports/monthly'),
         apiFetch<any>('/api/payments/integration-guide'),
@@ -164,6 +197,7 @@ export const AdminVerificationPortal: React.FC = () => {
         apiFetch<any>('/api/operations/projects'),
         apiFetch<any>('/api/communications/centre'),
         apiFetch<any>('/api/communications/talksasa/logs').catch(() => null),
+        isSuperAdmin ? apiFetch<any>('/api/admin/users-directory').catch(() => null) : Promise.resolve(null),
       ]);
       setAdminData(ov);
       setMonthlyReport(rep);
@@ -172,6 +206,7 @@ export const AdminVerificationPortal: React.FC = () => {
       setProjectsData(proj);
       setCommCentre(comm);
       setTalksasaData(ts);
+      if (dir) setUsersDirectory(dir);
 
       if (ov.verificationCases?.[0] && !selectedCaseId) {
         setSelectedCaseId(ov.verificationCases[0].id);
@@ -271,15 +306,25 @@ export const AdminVerificationPortal: React.FC = () => {
 
         <div className="flex flex-wrap items-center gap-2.5">
           {user?.roles.includes('SUPER_ADMIN') && (
-            <GlossyButton
-              size="sm"
-              variant="gold"
-              disabled={exportingDump}
-              onClick={downloadPgDump}
-            >
-              <Download className="w-3.5 h-3.5" />
-              {exportingDump ? 'Exporting SQL...' : 'Download PostgreSQL Dump (.sql)'}
-            </GlossyButton>
+            <>
+              <GlossyButton
+                size="sm"
+                variant={tab === 'accounts' ? 'green' : 'teal'}
+                onClick={() => setTab(tab === 'accounts' ? 'verification' : 'accounts')}
+              >
+                <Users className="w-3.5 h-3.5" />
+                Registered Accounts ({usersDirectory?.totalCount ?? adminData?.users?.length ?? 0})
+              </GlossyButton>
+              <GlossyButton
+                size="sm"
+                variant="gold"
+                disabled={exportingDump}
+                onClick={downloadPgDump}
+              >
+                <Download className="w-3.5 h-3.5" />
+                {exportingDump ? 'Exporting SQL...' : 'Download PostgreSQL Dump (.sql)'}
+              </GlossyButton>
+            </>
           )}
           <ExportReportBar
             title="Humanity Connect Monthly Financial & Audit Report"
@@ -1423,6 +1468,10 @@ export const AdminVerificationPortal: React.FC = () => {
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <GlossyButton variant="green" onClick={() => setTab('accounts')}>
+                  <Users className="w-4 h-4" />
+                  Registered Accounts ({usersDirectory?.totalCount ?? adminData?.users?.length ?? 0})
+                </GlossyButton>
                 <GlossyButton variant="teal" onClick={() => setCreateSubAdminOpen((v) => !v)}>
                   <UserPlus className="w-4 h-4" />
                   {createSubAdminOpen ? 'Hide Sub-Admin Form' : 'Create Sub-Admin'}
@@ -1582,7 +1631,8 @@ export const AdminVerificationPortal: React.FC = () => {
               <table className="w-full text-left text-xs">
                 <thead className="border-b border-[#102E36]/15 text-[#4A636A]">
                   <tr>
-                    <th className="py-2 pr-4">User</th>
+                    <th className="py-2 pr-4">User & Contact</th>
+                    <th className="py-2 pr-4">County / Sub-County</th>
                     <th className="py-2 pr-4">Assigned Roles & Granular Flags</th>
                     <th className="py-2 pr-4">MFA</th>
                     <th className="py-2 pr-4">Status</th>
@@ -1604,6 +1654,13 @@ export const AdminVerificationPortal: React.FC = () => {
                         <td className="py-3 pr-4">
                           <div className="font-bold text-[#102E36]">{u.fullName}</div>
                           <div className="text-[#4A636A]">{u.email}</div>
+                          {u.phoneE164 && (
+                            <div className="font-mono-num text-[11px] text-[#287A59]">{u.phoneE164}</div>
+                          )}
+                        </td>
+                        <td className="py-3 pr-4">
+                          <div className="font-semibold text-[#102E36]">{u.county || '—'}</div>
+                          <div className="text-[11px] text-[#4A636A]">{u.subCounty || '—'}</div>
                         </td>
                         <td className="py-3 pr-4">
                           <div className="font-mono-num font-semibold text-[#102E36]">
@@ -1968,6 +2025,294 @@ export const AdminVerificationPortal: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* 8. Super Admin Only: Registered User Accounts Directory (Name, Contact, County & Sub-County) */}
+      {tab === 'accounts' && user?.roles.includes('SUPER_ADMIN') && (() => {
+        const allUsers = usersDirectory?.users || [];
+        const distinctCounties = Array.from(
+          new Set(allUsers.map((u) => (u.county || '').trim()).filter(Boolean))
+        ).sort((a, b) => a.localeCompare(b));
+        const distinctRoles = Array.from(
+          new Set(allUsers.flatMap((u) => u.roles || []).filter(Boolean))
+        ).sort((a, b) => a.localeCompare(b));
+
+        const queryLower = dirSearch.trim().toLowerCase();
+        const filteredUsers = allUsers.filter((u) => {
+          if (dirCountyFilter !== 'ALL') {
+            if (dirCountyFilter === '__UNSPECIFIED__') {
+              if (u.county && u.county.trim() !== '') return false;
+            } else if ((u.county || '').trim() !== dirCountyFilter) {
+              return false;
+            }
+          }
+          if (dirRoleFilter !== 'ALL' && !(u.roles || []).includes(dirRoleFilter)) {
+            return false;
+          }
+          if (!queryLower) return true;
+          const haystack = [
+            u.fullName,
+            u.email,
+            u.phoneE164 || '',
+            u.county || '',
+            u.subCounty || '',
+            u.ward || '',
+            u.beneficiaryRef || '',
+            ...(u.roles || []),
+          ]
+            .join(' ')
+            .toLowerCase();
+          return haystack.includes(queryLower);
+        });
+
+        const exportRows = filteredUsers.map((u, idx) => ({
+          No: idx + 1,
+          Name: u.fullName,
+          Phone: u.phoneE164 || '',
+          Email: u.email,
+          County: u.county || '',
+          SubCounty: u.subCounty || '',
+          Ward: u.ward || '',
+          Roles: (u.roles || []).join('; '),
+          Status: u.approvalStatus,
+          EmailVerified: u.emailVerified ? 'Yes' : 'No',
+          PhoneVerified: u.phoneVerified ? 'Yes' : 'No',
+          RegisteredAt: new Date(u.createdAt).toLocaleString('en-KE'),
+        }));
+
+        const phoneCount = allUsers.filter((u) => Boolean(u.phoneE164)).length;
+        const activeCount = allUsers.filter((u) => u.approvalStatus === 'ACTIVE').length;
+
+        return (
+          <div className="space-y-6">
+            <div className="hc-card p-6 space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-[#287A59]">
+                    <ShieldCheck className="w-4 h-4" />
+                    Super Admin Exclusively Authorised Directory
+                  </div>
+                  <h3 className="text-xl font-extrabold text-[#102E36]">
+                    All Registered User Accounts — Name, Contact, County &amp; Sub-County
+                  </h3>
+                  <p className="text-xs text-[#4A636A]">
+                    Live PostgreSQL registry of every individual, beneficiary, guardian, supporter, well-wisher,
+                    and officer account created on the platform across all browsers.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <GlossyButton
+                    size="sm"
+                    variant="ivory"
+                    disabled={dirRefreshing}
+                    onClick={async () => {
+                      setDirRefreshing(true);
+                      setErrorMsg(null);
+                      try {
+                        const fresh = await apiFetch<any>('/api/admin/users-directory');
+                        setUsersDirectory(fresh);
+                        setFeedback(`Refreshed directory: ${fresh.totalCount} registered accounts loaded from PostgreSQL.`);
+                      } catch (err: any) {
+                        setErrorMsg(err.message || 'Unable to refresh registered accounts directory.');
+                      } finally {
+                        setDirRefreshing(false);
+                      }
+                    }}
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${dirRefreshing ? 'animate-spin' : ''}`} />
+                    {dirRefreshing ? 'Refreshing...' : 'Refresh Directory'}
+                  </GlossyButton>
+                  <GlossyButton size="sm" variant="teal" onClick={() => setTab('governance')}>
+                    Open RBAC &amp; Governance
+                  </GlossyButton>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  { label: 'Total Registered Accounts', val: allUsers.length, tone: 'text-[#102E36]' },
+                  { label: 'With Phone Contact', val: phoneCount, tone: 'text-[#287A59]' },
+                  { label: 'Counties Represented', val: distinctCounties.length, tone: 'text-[#102E36]' },
+                  { label: 'Active Accounts', val: activeCount, tone: 'text-[#287A59]' },
+                ].map((kpi) => (
+                  <div key={kpi.label} className="p-3.5 rounded-xl bg-white border border-[#102E36]/12">
+                    <div className="text-[11px] text-[#4A636A]">{kpi.label}</div>
+                    <div className={`text-2xl font-extrabold font-mono-num mt-0.5 ${kpi.tone}`}>
+                      {kpi.val}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="hc-card p-6 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end text-xs">
+                <div className="md:col-span-5">
+                  <label className="block font-semibold text-[#102E36] mb-1">
+                    Search Name, Contact, County, or Sub-County
+                  </label>
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-[#4A636A] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={dirSearch}
+                      onChange={(e) => setDirSearch(e.target.value)}
+                      placeholder="e.g. Jane, +2547, Nairobi, Westlands..."
+                      className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15 text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="md:col-span-3">
+                  <label className="block font-semibold text-[#102E36] mb-1">Filter by County</label>
+                  <select
+                    value={dirCountyFilter}
+                    onChange={(e) => setDirCountyFilter(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15 text-sm"
+                  >
+                    <option value="ALL">All Counties ({allUsers.length})</option>
+                    {distinctCounties.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                    <option value="__UNSPECIFIED__">County Not Specified</option>
+                  </select>
+                </div>
+                <div className="md:col-span-4">
+                  <label className="block font-semibold text-[#102E36] mb-1">Filter by Account Role</label>
+                  <select
+                    value={dirRoleFilter}
+                    onChange={(e) => setDirRoleFilter(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15 text-sm"
+                  >
+                    <option value="ALL">All Account Categories</option>
+                    {distinctRoles.map((rc) => (
+                      <option key={rc} value={rc}>
+                        {ROLE_DEFINITIONS[rc as RoleCode]?.label || rc} ({rc})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <div className="text-xs text-[#4A636A]">
+                  Showing <strong className="text-[#102E36] font-mono-num">{filteredUsers.length}</strong> of{' '}
+                  <strong className="text-[#102E36] font-mono-num">{allUsers.length}</strong> registered accounts
+                  {(dirSearch || dirCountyFilter !== 'ALL' || dirRoleFilter !== 'ALL') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDirSearch('');
+                        setDirCountyFilter('ALL');
+                        setDirRoleFilter('ALL');
+                      }}
+                      className="ml-3 text-[#287A59] font-semibold underline"
+                    >
+                      Clear Filters
+                    </button>
+                  )}
+                </div>
+                <ExportReportBar
+                  title="Humanity Connect Registered User Accounts Directory"
+                  rows={exportRows}
+                  csvFilename={`humanity-connect-registered-users-${new Date().toISOString().slice(0, 10)}.csv`}
+                />
+              </div>
+
+              <div className="overflow-x-auto border border-[#102E36]/12 rounded-xl bg-white">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-[#EAE6DC]/60 border-b border-[#102E36]/15 text-[#102E36]">
+                    <tr>
+                      <th className="py-3 px-3.5 font-bold">#</th>
+                      <th className="py-3 px-3.5 font-bold">Name &amp; Category</th>
+                      <th className="py-3 px-3.5 font-bold">Contact (Phone &amp; Email)</th>
+                      <th className="py-3 px-3.5 font-bold">County</th>
+                      <th className="py-3 px-3.5 font-bold">Sub-County</th>
+                      <th className="py-3 px-3.5 font-bold">Status &amp; Registered</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#102E36]/10">
+                    {filteredUsers.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-10 px-4 text-center text-sm text-[#4A636A]">
+                          No registered accounts match your current search or filters.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredUsers.map((u, idx) => (
+                        <tr key={u.id} className="hover:bg-[#FAF9F6]/80 transition-colors">
+                          <td className="py-3.5 px-3.5 font-mono-num text-[#4A636A] align-top">
+                            {idx + 1}
+                          </td>
+                          <td className="py-3.5 px-3.5 align-top">
+                            <div className="font-bold text-sm text-[#102E36]">{u.fullName}</div>
+                            <div className="text-[11px] font-mono-num text-[#287A59] mt-0.5">
+                              {(u.roles || []).length > 0
+                                ? u.roles
+                                    .map((r) => ROLE_DEFINITIONS[r as RoleCode]?.label || r)
+                                    .join(' · ')
+                                : 'Standard Account'}
+                            </div>
+                            {u.beneficiaryRef && (
+                              <div className="text-[11px] font-mono-num text-[#4A636A] mt-0.5">
+                                Case Ref: {u.beneficiaryRef}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-3.5 align-top space-y-1">
+                            <div className="flex items-center gap-1.5 font-mono-num font-semibold text-[#102E36]">
+                              <Phone className="w-3.5 h-3.5 text-[#287A59] shrink-0" />
+                              <span>{u.phoneE164 || 'No phone recorded'}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[#4A636A]">
+                              <Mail className="w-3.5 h-3.5 text-[#4A636A] shrink-0" />
+                              <span className="break-all">{u.email}</span>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-3.5 align-top">
+                            <div className="inline-flex items-center gap-1 font-semibold text-[#102E36]">
+                              <MapPin className="w-3.5 h-3.5 text-[#287A59] shrink-0" />
+                              <span>{u.county || 'Not specified'}</span>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-3.5 align-top">
+                            <div className="font-medium text-[#102E36]">
+                              {u.subCounty || 'Not specified'}
+                            </div>
+                            {u.ward && (
+                              <div className="text-[11px] text-[#4A636A]">Ward: {u.ward}</div>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-3.5 align-top space-y-0.5">
+                            <div
+                              className={`font-bold ${
+                                u.approvalStatus === 'ACTIVE'
+                                  ? 'text-[#287A59]'
+                                  : u.approvalStatus === 'SUSPENDED'
+                                    ? 'text-[#9F2D20]'
+                                    : 'text-[#B6721A]'
+                              }`}
+                            >
+                              {u.approvalStatus}
+                            </div>
+                            <div className="text-[11px] text-[#4A636A]">
+                              {u.emailVerified ? 'Email verified' : 'Email unverified'} ·{' '}
+                              {u.phoneVerified ? 'Phone verified' : 'Phone unverified'}
+                            </div>
+                            <div className="text-[11px] font-mono-num text-[#4A636A]">
+                              {new Date(u.createdAt).toLocaleDateString('en-KE')}
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Interactive Permission Mapping & Live 12-Verb Preview Modal */}
       <ModalDialog

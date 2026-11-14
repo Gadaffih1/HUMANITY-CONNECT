@@ -155,7 +155,20 @@ adminRouter.get('/overview', async (req: AuthRequest, res) => {
           id: users.id,
           email: users.email,
           fullName: users.fullName,
+          phoneE164: users.phoneE164,
           countryCode: users.countryCode,
+          county: sql<string | null>`COALESCE(
+            NULLIF(${users.county}, ''),
+            (SELECT county FROM public.beneficiary_profiles WHERE user_id = ${users.id} LIMIT 1),
+            (SELECT county_assignment FROM public.staff_employee_profiles WHERE user_id = ${users.id} LIMIT 1),
+            (SELECT county FROM public.field_geography_officers WHERE user_id = ${users.id} LIMIT 1)
+          )`,
+          subCounty: sql<string | null>`COALESCE(
+            NULLIF(${users.subCounty}, ''),
+            (SELECT sub_county FROM public.beneficiary_profiles WHERE user_id = ${users.id} LIMIT 1),
+            (SELECT sub_county_assignment FROM public.staff_employee_profiles WHERE user_id = ${users.id} LIMIT 1),
+            (SELECT sub_county FROM public.field_geography_officers WHERE user_id = ${users.id} LIMIT 1)
+          )`,
           mfaEnabled: users.mfaEnabled,
           approvalStatus: users.approvalStatus,
           createdAt: users.createdAt,
@@ -242,6 +255,131 @@ adminRouter.get('/overview', async (req: AuthRequest, res) => {
     res.status(500).json({ error: 'Unable to load governance overview.' });
   }
 });
+
+// Super Admin Registered User Accounts Directory (all accounts: name, contact, county, sub-county)
+adminRouter.get(
+  '/users-directory',
+  requireRole('SUPER_ADMIN'),
+  async (_req: AuthRequest, res) => {
+    try {
+      const directoryRes = await pool.query<{
+        id: string;
+        full_name: string;
+        email: string;
+        phone_e164: string | null;
+        country_code: string;
+        county: string | null;
+        sub_county: string | null;
+        ward: string | null;
+        approval_status: string;
+        email_verified: boolean;
+        phone_verified: boolean;
+        mfa_enabled: boolean;
+        last_login_at: string | null;
+        created_at: string;
+        roles: string[] | null;
+        beneficiary_classification: string | null;
+        beneficiary_ref: string | null;
+      }>(`
+        SELECT
+          u.id,
+          u.full_name,
+          u.email,
+          u.phone_e164,
+          u.country_code,
+          COALESCE(NULLIF(u.county, ''), bp.county, sep.county_assignment, fgo.county) AS county,
+          COALESCE(NULLIF(u.sub_county, ''), bp.sub_county, sep.sub_county_assignment, fgo.sub_county) AS sub_county,
+          COALESCE(bp.ward, fgo.ward) AS ward,
+          u.approval_status,
+          (u.email_verified_at IS NOT NULL) AS email_verified,
+          (u.phone_verified_at IS NOT NULL) AS phone_verified,
+          u.mfa_enabled,
+          u.last_login_at,
+          u.created_at,
+          COALESCE(
+            ARRAY_AGG(DISTINCT r.code) FILTER (WHERE r.code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS roles,
+          bp.classification AS beneficiary_classification,
+          bp.reference_code AS beneficiary_ref
+        FROM public.users u
+        LEFT JOIN public.user_roles ur ON ur.user_id = u.id AND ur.status = 'ACTIVE'
+        LEFT JOIN public.roles r ON r.id = ur.role_id
+        LEFT JOIN LATERAL (
+          SELECT county, sub_county, ward, classification, reference_code
+          FROM public.beneficiary_profiles
+          WHERE user_id = u.id
+          LIMIT 1
+        ) bp ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT county_assignment, sub_county_assignment
+          FROM public.staff_employee_profiles
+          WHERE user_id = u.id
+          LIMIT 1
+        ) sep ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT county, sub_county, ward
+          FROM public.field_geography_officers
+          WHERE user_id = u.id
+          LIMIT 1
+        ) fgo ON TRUE
+        GROUP BY
+          u.id,
+          u.full_name,
+          u.email,
+          u.phone_e164,
+          u.country_code,
+          u.county,
+          u.sub_county,
+          u.approval_status,
+          u.email_verified_at,
+          u.phone_verified_at,
+          u.mfa_enabled,
+          u.last_login_at,
+          u.created_at,
+          bp.county,
+          bp.sub_county,
+          bp.ward,
+          bp.classification,
+          bp.reference_code,
+          sep.county_assignment,
+          sep.sub_county_assignment,
+          fgo.county,
+          fgo.sub_county,
+          fgo.ward
+        ORDER BY u.created_at DESC;
+      `);
+
+      const directoryUsers = directoryRes.rows.map((row) => ({
+        id: row.id,
+        fullName: row.full_name,
+        email: row.email,
+        phoneE164: row.phone_e164,
+        countryCode: row.country_code,
+        county: row.county,
+        subCounty: row.sub_county,
+        ward: row.ward,
+        approvalStatus: row.approval_status,
+        emailVerified: Boolean(row.email_verified),
+        phoneVerified: Boolean(row.phone_verified),
+        mfaEnabled: Boolean(row.mfa_enabled),
+        lastLoginAt: row.last_login_at,
+        createdAt: row.created_at,
+        roles: Array.isArray(row.roles) ? row.roles : [],
+        beneficiaryClassification: row.beneficiary_classification,
+        beneficiaryRef: row.beneficiary_ref,
+      }));
+
+      res.json({
+        totalCount: directoryUsers.length,
+        users: directoryUsers,
+      });
+    } catch (err) {
+      console.error('Super Admin users directory error:', err);
+      res.status(500).json({ error: 'Unable to load registered users directory.' });
+    }
+  }
+);
 
 // Verification Centre Multi-Officer Decision & Case History
 adminRouter.post(
@@ -753,6 +891,8 @@ adminRouter.post(
         email: z.string().email(),
         password: z.string().min(10, 'Password must be at least 10 characters.'),
         phoneE164: z.string().optional(),
+        county: z.string().trim().max(80).optional(),
+        subCounty: z.string().trim().max(80).optional(),
         roleCode: z.enum(SUB_ADMIN_ROLE_CODES as [RoleCode, ...RoleCode[]]),
         permissionFlags: z.array(z.string()).default([]),
         additionalAuthorizationReason: z.string().optional(),
@@ -809,6 +949,8 @@ adminRouter.post(
             phoneE164: d.phoneE164?.trim() || null,
             passwordHash,
             countryCode: 'KE',
+            county: d.county?.trim() || null,
+            subCounty: d.subCounty?.trim() || null,
             approvalStatus: 'ACTIVE',
             emailVerifiedAt: new Date(),
           })

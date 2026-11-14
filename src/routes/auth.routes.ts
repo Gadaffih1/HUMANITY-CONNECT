@@ -164,6 +164,8 @@ authRouter.post('/register', async (req, res) => {
           phoneE164: normalizedPhone?.ok ? normalizedPhone.e164 : null,
           passwordHash,
           countryCode: data.countryCode.toUpperCase(),
+          county: data.county.trim(),
+          subCounty: data.subCounty?.trim() || null,
           approvalStatus: 'ACTIVE',
         })
         .returning();

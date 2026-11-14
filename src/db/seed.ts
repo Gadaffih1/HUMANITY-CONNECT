@@ -36,9 +36,15 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
 }
 
 async function ensureCoreAuthSchema(): Promise<void> {
+  // gen_random_uuid() is built into PostgreSQL 13+; only attempt pgcrypto when permitted
+  await pool
+    .query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`)
+    .catch(() => {
+      // Restricted DB roles may lack CREATE on database for extensions even when pgcrypto or core gen_random_uuid() is already available
+    });
+
   await withDbRetry(() =>
     pool.query(`
-      CREATE EXTENSION IF NOT EXISTS "pgcrypto";
       CREATE TABLE IF NOT EXISTS "public"."users" (
         "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
         "firebase_uid" text UNIQUE,
@@ -47,6 +53,8 @@ async function ensureCoreAuthSchema(): Promise<void> {
         "phone_e164" text UNIQUE,
         "password_hash" text,
         "country_code" text DEFAULT 'KE' NOT NULL,
+        "county" text,
+        "sub_county" text,
         "preferred_language" text DEFAULT 'en' NOT NULL,
         "email_verified_at" timestamptz,
         "phone_verified_at" timestamptz,
@@ -60,12 +68,46 @@ async function ensureCoreAuthSchema(): Promise<void> {
         "created_at" timestamptz DEFAULT now() NOT NULL,
         "updated_at" timestamptz DEFAULT now() NOT NULL
       );
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "county" text;
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "sub_county" text;
       ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "failed_login_attempts" integer DEFAULT 0 NOT NULL;
       ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "locked_until" timestamptz;
       ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "last_login_at" timestamptz;
       ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "mfa_enabled" boolean DEFAULT false NOT NULL;
       ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "mfa_secret_enc" text;
       ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "suspension_reason" text;
+      CREATE INDEX IF NOT EXISTS idx_users_county ON public.users USING btree (country_code, county);
+
+      DO $$
+      BEGIN
+        IF to_regclass('public.beneficiary_profiles') IS NOT NULL THEN
+          UPDATE "public"."users" u
+          SET
+            "county" = COALESCE(NULLIF(u."county", ''), bp."county"),
+            "sub_county" = COALESCE(NULLIF(u."sub_county", ''), bp."sub_county")
+          FROM "public"."beneficiary_profiles" bp
+          WHERE bp."user_id" = u."id"
+            AND (u."county" IS NULL OR u."county" = '' OR u."sub_county" IS NULL OR u."sub_county" = '');
+        END IF;
+        IF to_regclass('public.staff_employee_profiles') IS NOT NULL THEN
+          UPDATE "public"."users" u
+          SET
+            "county" = COALESCE(NULLIF(u."county", ''), sep."county_assignment"),
+            "sub_county" = COALESCE(NULLIF(u."sub_county", ''), sep."sub_county_assignment")
+          FROM "public"."staff_employee_profiles" sep
+          WHERE sep."user_id" = u."id"
+            AND (u."county" IS NULL OR u."county" = '' OR u."sub_county" IS NULL OR u."sub_county" = '');
+        END IF;
+        IF to_regclass('public.field_geography_officers') IS NOT NULL THEN
+          UPDATE "public"."users" u
+          SET
+            "county" = COALESCE(NULLIF(u."county", ''), fgo."county"),
+            "sub_county" = COALESCE(NULLIF(u."sub_county", ''), fgo."sub_county")
+          FROM "public"."field_geography_officers" fgo
+          WHERE fgo."user_id" = u."id"
+            AND (u."county" IS NULL OR u."county" = '' OR u."sub_county" IS NULL OR u."sub_county" = '');
+        END IF;
+      END $$;
 
       CREATE TABLE IF NOT EXISTS "public"."roles" (
         "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -271,6 +313,7 @@ async function runSeed(): Promise<void> {
         staff_count: number;
         has_sessions: boolean;
         has_user_perms: boolean;
+        has_user_county: boolean;
       }>(`
         SELECT
           (SELECT count(*)::int FROM roles) AS roles_count,
@@ -278,12 +321,21 @@ async function runSeed(): Promise<void> {
           (SELECT count(*)::int FROM needs_categories) AS cats_count,
           (SELECT count(*)::int FROM staff_positions) AS staff_count,
           (to_regclass('public.user_sessions') IS NOT NULL) AS has_sessions,
-          (to_regclass('public.user_permissions') IS NOT NULL) AS has_user_perms
+          (to_regclass('public.user_permissions') IS NOT NULL) AS has_user_perms,
+          EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'county'
+          ) AS has_user_county
       `),
     2
   ).catch(() => null);
 
-  if (!fastCheck?.rows?.[0] || !fastCheck.rows[0].has_sessions || !fastCheck.rows[0].has_user_perms) {
+  if (
+    !fastCheck?.rows?.[0] ||
+    !fastCheck.rows[0].has_sessions ||
+    !fastCheck.rows[0].has_user_perms ||
+    !fastCheck.rows[0].has_user_county
+  ) {
     await ensureCoreAuthSchema().catch((schemaErr) => {
       console.warn('Core auth schema check warning:', schemaErr);
     });

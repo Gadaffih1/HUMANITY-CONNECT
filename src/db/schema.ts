@@ -24,6 +24,8 @@ export const users = pgTable(
     phoneE164: text('phone_e164').unique(),
     passwordHash: text('password_hash'),
     countryCode: text('country_code').notNull().default('KE'),
+    county: text('county'),
+    subCounty: text('sub_county'),
     preferredLanguage: text('preferred_language').notNull().default('en'),
     emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true }),
     phoneVerifiedAt: timestamp('phone_verified_at', { withTimezone: true }),
@@ -39,6 +41,7 @@ export const users = pgTable(
   },
   (t) => [
     index('idx_users_country_status').on(t.countryCode, t.approvalStatus),
+    index('idx_users_county').on(t.countryCode, t.county),
   ]
 );
 
