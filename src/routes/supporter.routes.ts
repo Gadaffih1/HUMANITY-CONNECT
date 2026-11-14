@@ -19,7 +19,7 @@ import {
   sponsorshipMatchSuggestions,
   disbursements,
 } from '../db/schema.ts';
-import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import { requireAuth, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 import { sha256Hex } from '../lib/crypto.ts';
 import { buildImpactTimeline } from '../lib/impactTimeline.ts';
 

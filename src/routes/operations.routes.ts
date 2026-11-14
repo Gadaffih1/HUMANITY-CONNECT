@@ -18,7 +18,7 @@ import {
   requireAuth,
   requireRole,
   requirePrivilegedMfa,
-  AuthRequest,
+  type AuthRequest,
   writeAuditLog,
 } from '../middleware/auth.ts';
 

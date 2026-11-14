@@ -220,7 +220,7 @@ export const AdminVerificationPortal: React.FC = () => {
       const headers = new Headers();
       if (token) headers.set('Authorization', `Bearer ${token}`);
       if (user?.activeRole) headers.set('X-Active-Role', user.activeRole);
-      const res = await fetch('/api/admin/export-pg-dump', { headers });
+      const res = await fetch('/api/admin/export-pg-dump', { headers, credentials: 'include' });
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || `Export failed (${res.status})`);

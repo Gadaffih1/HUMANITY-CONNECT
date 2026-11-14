@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
 import { eq, and, desc, isNull, gt } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import {
   users,
   roles,
@@ -30,7 +30,7 @@ import {
 } from '../lib/crypto.ts';
 import {
   requireAuth,
-  AuthRequest,
+  type AuthRequest,
   loadUserAuthContext,
   writeAuditLog,
   setSessionCookie,
@@ -295,7 +295,9 @@ authRouter.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Valid email and password are required.' });
     }
     const email = parsed.data.email.trim().toLowerCase();
-    const [userRow] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    const [userRow] = await withDbRetry(() =>
+      db.select().from(users).where(eq(users.email, email)).limit(1)
+    );
 
     if (!userRow || !userRow.passwordHash) {
       return res.status(401).json({ error: 'Invalid credentials or Google Sign-In account.' });
@@ -378,6 +380,11 @@ authRouter.post('/login', async (req, res) => {
     });
   } catch (err: any) {
     console.error('Login error:', err);
+    if (isTransientDbError(err)) {
+      return res.status(503).json({
+        error: 'Database connection interrupted while signing in. Please retry shortly.',
+      });
+    }
     res.status(500).json({ error: 'Login failed.' });
   }
 });

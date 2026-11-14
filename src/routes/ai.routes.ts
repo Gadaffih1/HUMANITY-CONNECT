@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import { requireAuth, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 import { assistHumanitarianText } from '../lib/gemini.ts';
 
 export const aiRouter = Router();

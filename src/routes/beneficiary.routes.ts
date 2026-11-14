@@ -19,7 +19,7 @@ import {
   verificationCases,
   safeguardingIncidents,
 } from '../db/schema.ts';
-import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import { requireAuth, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 import { encryptSensitiveText, decryptSensitiveText } from '../lib/crypto.ts';
 import { storeEncryptedPrivateObject, readEncryptedPrivateObject } from '../lib/storage.ts';
 

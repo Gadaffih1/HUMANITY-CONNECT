@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { eq, and, isNull, gt } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {

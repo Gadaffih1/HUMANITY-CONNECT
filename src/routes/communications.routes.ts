@@ -9,7 +9,7 @@ import {
   talksasaSmsLogs,
   talksasaWebhookEvents,
 } from '../db/schema.ts';
-import { requireAuth, requireRole, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import { requireAuth, requireRole, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 import {
   dispatchTalksasaSms,
   getTalkSasaGatewayPublicStatus,

@@ -1,5 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
-import { db } from './index.ts';
+import { db, pool, withDbRetry } from './index.ts';
 import {
   roles,
   permissions,
@@ -36,6 +36,34 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
 }
 
 async function runSeed(): Promise<void> {
+  // Fast-path check: skip 180+ redundant seed round-trips when reference data is already seeded
+  const fastCheck = await withDbRetry(
+    () =>
+      pool.query<{
+        roles_count: number;
+        perms_count: number;
+        cats_count: number;
+        staff_count: number;
+      }>(`
+        SELECT
+          (SELECT count(*)::int FROM roles) AS roles_count,
+          (SELECT count(*)::int FROM permissions) AS perms_count,
+          (SELECT count(*)::int FROM needs_categories) AS cats_count,
+          (SELECT count(*)::int FROM staff_positions) AS staff_count
+      `),
+    2
+  ).catch(() => null);
+
+  if (
+    fastCheck?.rows?.[0] &&
+    fastCheck.rows[0].roles_count >= 15 &&
+    fastCheck.rows[0].perms_count >= 22 &&
+    fastCheck.rows[0].cats_count >= 15 &&
+    fastCheck.rows[0].staff_count >= STAFF_ESTABLISHMENT_170.length
+  ) {
+    return;
+  }
+
   // 1. Roles
   const roleSeeds = [
     {
@@ -712,26 +740,34 @@ async function runSeed(): Promise<void> {
       },
     ];
     for (const patch of metadataPatches) {
-      await db
-        .update(beneficiaryProfiles)
-        .set({
-          ageGroup: patch.ageGroup,
-          specificChallenges: patch.challenges,
-        })
-        .where(eq(beneficiaryProfiles.referenceCode, patch.ref));
+      try {
+        await db
+          .update(beneficiaryProfiles)
+          .set({
+            ageGroup: patch.ageGroup,
+            specificChallenges: patch.challenges,
+          })
+          .where(eq(beneficiaryProfiles.referenceCode, patch.ref));
+      } catch (patchErr) {
+        console.warn('Non-fatal showcase metadata patch skipped:', patchErr);
+      }
     }
   }
 
   // 6. Seed all 170 Approved Establishment Positions (zero fake employees or appointments)
-  const [{ staffCount }] = await db
-    .select({ staffCount: sql<number>`count(*)::int` })
-    .from(staffPositions);
-  if (staffCount < STAFF_ESTABLISHMENT_170.length) {
-    for (const pos of STAFF_ESTABLISHMENT_170) {
-      await db
-        .insert(staffPositions)
-        .values(pos)
-        .onConflictDoNothing({ target: staffPositions.jobId });
+  try {
+    const [{ staffCount }] = await db
+      .select({ staffCount: sql<number>`count(*)::int` })
+      .from(staffPositions);
+    if (staffCount < STAFF_ESTABLISHMENT_170.length) {
+      for (const pos of STAFF_ESTABLISHMENT_170) {
+        await db
+          .insert(staffPositions)
+          .values(pos)
+          .onConflictDoNothing({ target: staffPositions.jobId });
+      }
     }
+  } catch (staffSeedErr) {
+    console.warn('Non-fatal staff establishment seed skipped:', staffSeedErr);
   }
 }

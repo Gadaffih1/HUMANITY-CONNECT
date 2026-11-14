@@ -15,7 +15,7 @@ import {
   users,
   sponsorshipMatchSuggestions,
 } from '../db/schema.ts';
-import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import { requireAuth, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 
 export const corporateRouter = Router();
 corporateRouter.use(requireAuth);
