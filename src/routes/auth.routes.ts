@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { eq, and, desc, isNull, gt, ne } from 'drizzle-orm';
 import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import { provisionSuperAdmin } from '../db/superAdmin.ts';
+import { ensureSupporterRegistrationSchema } from '../db/registrationSchema.ts';
 import {
   users,
   roles,
@@ -147,6 +148,10 @@ authRouter.post('/register', async (req, res) => {
           error: 'An account with this phone number is already registered. Please sign in instead.',
         });
       }
+    }
+
+    if (validRoles[0] === 'SUPPORTIVE' || validRoles[0] === 'WELL_WISHER') {
+      await ensureSupporterRegistrationSchema();
     }
 
     const passwordHash = await hashPassword(data.password);
@@ -351,11 +356,19 @@ authRouter.post('/register', async (req, res) => {
         phoneOtpIssued: Boolean(phoneOtp),
       },
     });
-  } catch (err: any) {
-    console.error('Register error:', err);
-    if (err?.code === '23505') {
-      const detail = String(err?.detail || err?.constraint || '').toLowerCase();
-      if (detail.includes('phone')) {
+  } catch (err: unknown) {
+    const outer = err && typeof err === 'object' ? err as { code?: string; cause?: unknown } : {};
+    const cause = outer.cause && typeof outer.cause === 'object'
+      ? outer.cause as { code?: string; table?: string; column?: string; constraint?: string }
+      : outer as { code?: string; table?: string; column?: string; constraint?: string };
+    console.error('Registration failed:', {
+      code: cause.code,
+      table: cause.table,
+      column: cause.column,
+      constraint: cause.constraint,
+    });
+    if (cause.code === '23505') {
+      if (cause.constraint?.toLowerCase().includes('phone')) {
         return res.status(409).json({
           error: 'An account with this phone number already exists.',
         });
@@ -367,7 +380,7 @@ authRouter.post('/register', async (req, res) => {
         error: 'Database service temporarily busy. Please retry registration shortly.',
       });
     }
-    res.status(500).json({ error: err.message || 'Registration failed' });
+    res.status(500).json({ error: 'Unable to create your account. Please try again or contact support.' });
   }
 });
 
