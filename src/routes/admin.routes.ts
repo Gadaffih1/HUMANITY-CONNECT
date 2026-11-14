@@ -43,6 +43,7 @@ import {
   buildPermissionPreview,
   userCanViewSafeguardingCases,
 } from '../lib/rbacPolicy.ts';
+import { dumpDataSelect, sqlLiteral } from '../lib/postgresDump.ts';
 
 export const adminRouter = Router();
 adminRouter.use(requireAuth);
@@ -1043,39 +1044,6 @@ adminRouter.post(
   }
 );
 
-function sqlLiteral(value: unknown, udtName?: string): string {
-  if (value === null || value === undefined) return 'NULL';
-  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
-  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
-  if (value instanceof Date) return `'${value.toISOString()}'::timestamptz`;
-  if (Buffer.isBuffer(value)) return `E'\\\\x${value.toString('hex')}'::bytea`;
-
-  const escapeStr = (s: string) => {
-    if (/[\n\r\t\\]/.test(s)) {
-      const escaped = s
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "''")
-        .replace(/\n/g, '\\n')
-        .replace(/\r/g, '\\r')
-        .replace(/\t/g, '\\t');
-      return `E'${escaped}'`;
-    }
-    return `'${s.replace(/'/g, "''")}'`;
-  };
-
-  if (Array.isArray(value)) {
-    if (value.length === 0) return `'{}'::text[]`;
-    return `ARRAY[${value.map((v) => escapeStr(String(v))).join(', ')}]::text[]`;
-  }
-
-  if (typeof value === 'object' || udtName === 'jsonb' || udtName === 'json') {
-    const jsonStr = typeof value === 'string' ? value : JSON.stringify(value);
-    return `${escapeStr(jsonStr)}::jsonb`;
-  }
-
-  return escapeStr(String(value));
-}
-
 // GET /api/admin/export-pg-dump — Downloadable PostgreSQL SQL dump for localhost restore
 adminRouter.get(
   '/export-pg-dump',
@@ -1128,7 +1096,7 @@ adminRouter.get(
       const lines: string[] = [
         '-- HUMANITY CONNECT — PostgreSQL Logical Dump',
         `-- Exported At: ${new Date().toISOString()}`,
-        '-- Target: PostgreSQL 15+ (localhost restore: psql -d humanity_connect -f humanity-connect-postgres-dump.sql)',
+        '-- Target: PostgreSQL 15+ (localhost restore: psql -v ON_ERROR_STOP=1 -d humanity_connect -f humanity-connect-postgres-dump.sql)',
         '',
         'BEGIN;',
         'SET statement_timeout = 0;',
@@ -1247,7 +1215,7 @@ adminRouter.get(
       for (const tableName of orderedTables) {
         const cols = tableColumnsMap.get(tableName) || [];
         if (cols.length === 0) continue;
-        const dataRes = await pool.query(`SELECT * FROM "public"."${tableName}"`);
+        const dataRes = await pool.query(dumpDataSelect(tableName, cols));
         lines.push(`-- Data for ${tableName} (${dataRes.rows.length} rows)`);
         const colNamesSql = cols.map((c) => `"${c.column_name}"`).join(', ');
         for (const row of dataRes.rows) {
