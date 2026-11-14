@@ -1418,7 +1418,8 @@ export const AdminVerificationPortal: React.FC = () => {
                 <p className="text-xs text-[#4A636A]">
                   Exports the full 50-table PostgreSQL DDL schema, foreign keys, indexes, and live data
                   into a downloadable <code>.sql</code> file for localhost restore via{' '}
-                  <code>psql -d humanity_connect -f humanity-connect-postgres-*.sql</code>.
+                  <code>psql -v ON_ERROR_STOP=1 -d humanity_connect -f humanity-connect-postgres-YYYY-MM-DD.sql</code>.
+                  If an older dump failed on a JSON column, download a new dump after updating the server.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
