@@ -39,6 +39,7 @@ import {
 } from '../middleware/auth.ts';
 import { dispatchTalksasaSms } from '../lib/talksasa.ts';
 import { normalizeKenyanMsisdn } from '../lib/talksasaUtils.ts';
+import { ensureReferenceDataSeeded, ensureSeededSuperAdmin } from '../db/seed.ts';
 import type { RoleCode } from '../types/domain.ts';
 
 export const authRouter = Router();
@@ -293,12 +294,16 @@ authRouter.post('/register', async (req, res) => {
         uid: insertedUser.id,
         exp: expiresAt.getTime(),
       });
+      const rawRegUa = Array.isArray(req.headers['user-agent'])
+        ? req.headers['user-agent'][0]
+        : req.headers['user-agent'];
+      const regUa = typeof rawRegUa === 'string' && rawRegUa.trim() ? rawRegUa.trim() : null;
       await tx.insert(userSessions).values({
         id: sessionId,
         userId: insertedUser.id,
         tokenHash: sha256Hex(signedToken),
-        deviceLabel: (req.headers['user-agent'] || 'Web Browser').slice(0, 60),
-        userAgent: req.headers['user-agent'] || null,
+        deviceLabel: (regUa || 'Web Browser').slice(0, 60),
+        userAgent: regUa,
         ipHash: req.ip ? sha256Hex(req.ip) : null,
         activeRoleCode: validRoles[0],
         expiresAt,
@@ -376,9 +381,19 @@ authRouter.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Valid email and password are required.' });
     }
     const email = parsed.data.email.trim().toLowerCase();
-    const [userRow] = await withDbRetry(() =>
+    const seededAdminEmail = (process.env.SUPER_ADMIN_EMAIL || 'gadmoz@gmail.com').trim().toLowerCase();
+
+    let [userRow] = await withDbRetry(() =>
       db.select().from(users).where(eq(users.email, email)).limit(1)
     );
+
+    if ((!userRow || !userRow.passwordHash) && email === seededAdminEmail) {
+      await ensureReferenceDataSeeded().catch(() => {});
+      await ensureSeededSuperAdmin().catch(() => {});
+      [userRow] = await withDbRetry(() =>
+        db.select().from(users).where(eq(users.email, email)).limit(1)
+      );
+    }
 
     if (!userRow || !userRow.passwordHash) {
       return res.status(401).json({ error: 'Invalid credentials or Google Sign-In account.' });
@@ -399,12 +414,16 @@ authRouter.post('/login', async (req, res) => {
 
     const ok = await verifyPassword(parsed.data.password, userRow.passwordHash);
     if (!ok) {
-      const attempts = userRow.failedLoginAttempts + 1;
+      const attempts = (userRow.failedLoginAttempts ?? 0) + 1;
       const lockedUntil = attempts >= 5 ? new Date(Date.now() + 15 * 60 * 1000) : null;
-      await db
-        .update(users)
-        .set({ failedLoginAttempts: attempts, lockedUntil })
-        .where(eq(users.id, userRow.id));
+      await withDbRetry(() =>
+        db
+          .update(users)
+          .set({ failedLoginAttempts: attempts, lockedUntil })
+          .where(eq(users.id, userRow.id))
+      ).catch((updateErr) => {
+        if (isTransientDbError(updateErr)) throw updateErr;
+      });
       await writeAuditLog({
         actorUserId: userRow.id,
         actorRole: 'ANONYMOUS',
@@ -421,10 +440,15 @@ authRouter.post('/login', async (req, res) => {
       });
     }
 
-    await db
-      .update(users)
-      .set({ failedLoginAttempts: 0, lockedUntil: null, lastLoginAt: new Date() })
-      .where(eq(users.id, userRow.id));
+    await withDbRetry(() =>
+      db
+        .update(users)
+        .set({ failedLoginAttempts: 0, lockedUntil: null, lastLoginAt: new Date() })
+        .where(eq(users.id, userRow.id))
+    ).catch((updateErr) => {
+      if (isTransientDbError(updateErr)) throw updateErr;
+      console.warn('Non-fatal login timestamp update warning:', updateErr);
+    });
 
     const ctxPreview = await loadUserAuthContext(userRow.id);
     const primaryRole = ctxPreview?.activeRole || 'SUPPORTIVE';
@@ -432,16 +456,25 @@ authRouter.post('/login', async (req, res) => {
     const sessionId = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const token = signSessionToken({ sid: sessionId, uid: userRow.id, exp: expiresAt.getTime() });
-    await db.insert(userSessions).values({
-      id: sessionId,
-      userId: userRow.id,
-      tokenHash: sha256Hex(token),
-      deviceLabel: parsed.data.deviceLabel || (req.headers['user-agent'] || 'Browser').slice(0, 60),
-      userAgent: req.headers['user-agent'] || null,
-      ipHash: req.ip ? sha256Hex(req.ip) : null,
-      activeRoleCode: primaryRole,
-      expiresAt,
-    });
+
+    const rawUa = Array.isArray(req.headers['user-agent'])
+      ? req.headers['user-agent'][0]
+      : req.headers['user-agent'];
+    const safeUa = typeof rawUa === 'string' && rawUa.trim() ? rawUa.trim() : null;
+    const safeDeviceLabel = (parsed.data.deviceLabel?.trim() || safeUa || 'Browser').slice(0, 60);
+
+    await withDbRetry(() =>
+      db.insert(userSessions).values({
+        id: sessionId,
+        userId: userRow.id,
+        tokenHash: sha256Hex(token),
+        deviceLabel: safeDeviceLabel,
+        userAgent: safeUa,
+        ipHash: req.ip ? sha256Hex(req.ip) : null,
+        activeRoleCode: primaryRole,
+        expiresAt,
+      })
+    );
 
     await writeAuditLog({
       actorUserId: userRow.id,
@@ -452,7 +485,15 @@ authRouter.post('/login', async (req, res) => {
       ip: req.ip,
     });
 
-    const user = await loadUserAuthContext(userRow.id, primaryRole, false, sessionId);
+    const user = ctxPreview
+      ? {
+          ...ctxPreview,
+          activeRole: primaryRole,
+          mfaVerifiedInSession: false,
+          sessionId,
+        }
+      : await loadUserAuthContext(userRow.id, primaryRole, false, sessionId);
+
     setSessionCookie(req, res, token);
     res.json({
       token,
@@ -466,7 +507,20 @@ authRouter.post('/login', async (req, res) => {
         error: 'Database connection interrupted while signing in. Please retry shortly.',
       });
     }
-    res.status(500).json({ error: 'Login failed.' });
+    const pgCode = err?.code || err?.cause?.code;
+    if (pgCode === '42P01' || pgCode === '42703') {
+      return res.status(500).json({
+        error: `Database schema requires synchronization (${err?.message || pgCode}).`,
+      });
+    }
+    if (pgCode === '28P01' || pgCode === '28000') {
+      return res.status(503).json({
+        error: 'Database authentication error. Please verify SQL credentials.',
+      });
+    }
+    res.status(500).json({
+      error: err?.message ? `Login failed: ${err.message}` : 'Login failed.',
+    });
   }
 });
 

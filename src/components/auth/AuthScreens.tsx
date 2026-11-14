@@ -7,6 +7,8 @@ import {
   UserCheck,
   AlertCircle,
   Lock,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { GlossyButton } from '../ui/DesignSystem';
@@ -22,10 +24,11 @@ const REGISTERABLE_ROLES: RoleCode[] = [
 ];
 
 export const AuthScreens: React.FC<{
-  initialMode?: 'login' | 'register';
+  initialMode?: 'login' | 'register' | 'reset';
   presetRole?: string;
   onSuccess: () => void;
-}> = ({ initialMode = 'login', presetRole = 'SUPPORTIVE', onSuccess }) => {
+  onOpenSuperAdmin?: () => void;
+}> = ({ initialMode = 'login', presetRole = 'SUPPORTIVE', onSuccess, onOpenSuperAdmin }) => {
   const { signInWithGoogle, loginWithPassword, registerAccount, apiFetch } = useAuth();
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>(initialMode);
   const [busy, setBusy] = useState(false);
@@ -34,6 +37,9 @@ export const AuthScreens: React.FC<{
   // Login form
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showRegisterPassword, setShowRegisterPassword] = useState(false);
+  const [showResetPassword, setShowResetPassword] = useState(false);
 
   // Registration form (supports multi-role + separate beneficiary flows)
   const [selectedRoles, setSelectedRoles] = useState<RoleCode[]>([
@@ -92,12 +98,19 @@ export const AuthScreens: React.FC<{
     }
   };
 
-  const handleLoginSubmit = async (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const emailVal = String(fd.get('email') ?? loginEmail).trim();
+    const passwordVal = String(fd.get('password') ?? loginPassword);
+    if (!emailVal || !passwordVal) {
+      setFeedback({ type: 'error', text: 'Please enter both your email address and password.' });
+      return;
+    }
     setBusy(true);
     setFeedback(null);
     try {
-      await loginWithPassword(loginEmail, loginPassword);
+      await loginWithPassword(emailVal, passwordVal);
       onSuccess();
     } catch (err: any) {
       setFeedback({ type: 'error', text: err.message || 'Sign in failed.' });
@@ -291,11 +304,14 @@ export const AuthScreens: React.FC<{
 
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold text-[#102E36] mb-1.5">
+                  <label htmlFor="auth-login-email" className="block text-xs font-semibold text-[#102E36] mb-1.5">
                     Email Address
                   </label>
                   <input
+                    id="auth-login-email"
+                    name="email"
                     type="email"
+                    autoComplete="username"
                     required
                     value={loginEmail}
                     onChange={(e) => setLoginEmail(e.target.value)}
@@ -304,23 +320,63 @@ export const AuthScreens: React.FC<{
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-[#102E36] mb-1.5">
-                    Password
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    placeholder="Minimum 8 characters"
-                    className="w-full px-4 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
-                  />
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label htmlFor="auth-login-password" className="block text-xs font-semibold text-[#102E36]">
+                      Password
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResetEmail(loginEmail);
+                        setMode('reset');
+                        setFeedback(null);
+                      }}
+                      className="text-xs font-semibold text-[#287A59] hover:underline"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <input
+                      id="auth-login-password"
+                      name="password"
+                      type={showLoginPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      required
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      placeholder="Enter your password"
+                      className="w-full pl-4 pr-10 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
+                    />
+                    <button
+                      type="button"
+                      aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
+                      onClick={() => setShowLoginPassword((prev) => !prev)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-[#4A636A] hover:text-[#102E36]"
+                    >
+                      {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
                 </div>
                 <GlossyButton type="submit" variant="teal" size="lg" className="w-full" disabled={busy}>
                   <KeyRound className="w-4 h-4" />
                   {busy ? 'Verifying...' : 'Sign In Securely'}
                 </GlossyButton>
               </form>
+
+              {onOpenSuperAdmin && (
+                <div className="pt-3 border-t border-[#102E36]/10 flex flex-wrap items-center justify-between gap-2 text-xs text-[#4A636A]">
+                  <span>Platform governance & officer access?</span>
+                  <button
+                    type="button"
+                    onClick={onOpenSuperAdmin}
+                    className="inline-flex items-center gap-1.5 font-semibold text-[#102E36] hover:text-[#287A59]"
+                  >
+                    <Lock className="w-3.5 h-3.5" />
+                    Super Admin Sign In
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -400,15 +456,26 @@ export const AuthScreens: React.FC<{
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-[#102E36] mb-1">Password (8+ chars)</label>
-                  <input
-                    type="password"
-                    required
-                    minLength={8}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Strong passphrase"
-                    className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showRegisterPassword ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      required
+                      minLength={8}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Strong passphrase"
+                      className="w-full pl-3.5 pr-10 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
+                    />
+                    <button
+                      type="button"
+                      aria-label={showRegisterPassword ? 'Hide password' : 'Show password'}
+                      onClick={() => setShowRegisterPassword((prev) => !prev)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[#4A636A] hover:text-[#102E36]"
+                    >
+                      {showRegisterPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -531,15 +598,26 @@ export const AuthScreens: React.FC<{
                     placeholder="6-digit verification code"
                     className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
                   />
-                  <input
-                    type="password"
-                    required
-                    minLength={8}
-                    value={resetNewPass}
-                    onChange={(e) => setResetNewPass(e.target.value)}
-                    placeholder="New password (8+ chars)"
-                    className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showResetPassword ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      required
+                      minLength={8}
+                      value={resetNewPass}
+                      onChange={(e) => setResetNewPass(e.target.value)}
+                      placeholder="New password (8+ chars)"
+                      className="w-full pl-3.5 pr-10 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
+                    />
+                    <button
+                      type="button"
+                      aria-label={showResetPassword ? 'Hide password' : 'Show password'}
+                      onClick={() => setShowResetPassword((prev) => !prev)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[#4A636A] hover:text-[#102E36]"
+                    >
+                      {showResetPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
                   <GlossyButton type="submit" variant="green" disabled={busy}>
                     Confirm Password Reset
                   </GlossyButton>

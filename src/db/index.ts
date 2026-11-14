@@ -66,8 +66,10 @@ function buildPoolConfig(): PoolConfig {
     const requiresSsl =
       connectionString.includes('sslmode=require') ||
       connectionString.includes('sslmode=verify-full') ||
+      connectionString.includes('sslmode=no-verify') ||
       process.env.SQL_SSL === 'true' ||
-      process.env.PGSSLMODE === 'require';
+      process.env.PGSSLMODE === 'require' ||
+      process.env.PGSSLMODE === 'verify-full';
     return {
       connectionString,
       ...(requiresSsl ? { ssl: { rejectUnauthorized: false } } : {}),
@@ -80,7 +82,9 @@ function buildPoolConfig(): PoolConfig {
   const isUnixSocket = Boolean(resolvedHost && resolvedHost.startsWith('/'));
   const useSsl =
     !isUnixSocket &&
-    (process.env.SQL_SSL === 'true' || process.env.PGSSLMODE === 'require');
+    (process.env.SQL_SSL === 'true' ||
+      process.env.PGSSLMODE === 'require' ||
+      process.env.PGSSLMODE === 'verify-full');
 
   return {
     host: resolvedHost,
@@ -117,21 +121,39 @@ const TRANSIENT_DB_CODES = new Set([
   'ECONNRESET',
   'ETIMEDOUT',
   'EPIPE',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  '57P01', // admin_shutdown
+  '57P02', // crash_shutdown
   '57P03', // cannot_connect_now (PostgreSQL starting up)
+  '53200', // out_of_memory
   '53300', // too_many_connections
-  '08006', // connection_failure
+  '53400', // configuration_limit_exceeded
+  '08000', // connection_exception
   '08001', // sqlclient_unable_to_establish_sqlconnection
+  '08003', // connection_does_not_exist
+  '08004', // sqlserver_rejected_establishment_of_sqlconnection
+  '08006', // connection_failure
+  '08P01', // protocol_violation
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
 ]);
 
 export function isTransientDbError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
-  const e = err as { code?: string; message?: string; cause?: { code?: string } };
+  const e = err as { code?: string; message?: string; cause?: { code?: string; message?: string } };
   const code = e.code || e.cause?.code || '';
   if (TRANSIENT_DB_CODES.has(code)) return true;
-  const msg = (e.message || '').toLowerCase();
+  const msg = `${e.message || ''} ${e.cause?.message || ''}`.toLowerCase();
   return (
     msg.includes('connection terminated') ||
     msg.includes('connection timeout') ||
+    msg.includes('timeout exceeded when trying to connect') ||
+    msg.includes('client has encountered a connection error') ||
+    msg.includes('sorry, too many clients already') ||
+    msg.includes('terminating connection') ||
     msg.includes('econnrefused') ||
     msg.includes('database system is starting up')
   );

@@ -20,7 +20,7 @@ import {
   matchingEngineConfig,
   staffPositions,
 } from './schema.ts';
-import { encryptSensitiveText, hashPassword } from '../lib/crypto.ts';
+import { encryptSensitiveText, hashPassword, verifyPassword } from '../lib/crypto.ts';
 import { STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
 
 let seedPromise: Promise<void> | null = null;
@@ -35,6 +35,231 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
   return seedPromise;
 }
 
+async function ensureCoreAuthSchema(): Promise<void> {
+  await withDbRetry(() =>
+    pool.query(`
+      CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+      CREATE TABLE IF NOT EXISTS "public"."users" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "firebase_uid" text UNIQUE,
+        "email" text NOT NULL UNIQUE,
+        "full_name" text NOT NULL,
+        "phone_e164" text UNIQUE,
+        "password_hash" text,
+        "country_code" text DEFAULT 'KE' NOT NULL,
+        "preferred_language" text DEFAULT 'en' NOT NULL,
+        "email_verified_at" timestamptz,
+        "phone_verified_at" timestamptz,
+        "mfa_enabled" boolean DEFAULT false NOT NULL,
+        "mfa_secret_enc" text,
+        "approval_status" text DEFAULT 'ACTIVE' NOT NULL,
+        "suspension_reason" text,
+        "failed_login_attempts" integer DEFAULT 0 NOT NULL,
+        "locked_until" timestamptz,
+        "last_login_at" timestamptz,
+        "created_at" timestamptz DEFAULT now() NOT NULL,
+        "updated_at" timestamptz DEFAULT now() NOT NULL
+      );
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "failed_login_attempts" integer DEFAULT 0 NOT NULL;
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "locked_until" timestamptz;
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "last_login_at" timestamptz;
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "mfa_enabled" boolean DEFAULT false NOT NULL;
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "mfa_secret_enc" text;
+      ALTER TABLE "public"."users" ADD COLUMN IF NOT EXISTS "suspension_reason" text;
+
+      CREATE TABLE IF NOT EXISTS "public"."roles" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "code" text NOT NULL UNIQUE,
+        "name" text NOT NULL,
+        "description" text NOT NULL,
+        "is_beneficiary_role" boolean DEFAULT false NOT NULL,
+        "is_privileged" boolean DEFAULT false NOT NULL,
+        "requires_mfa" boolean DEFAULT false NOT NULL,
+        "self_assignable" boolean DEFAULT true NOT NULL,
+        "created_at" timestamptz DEFAULT now() NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS "public"."permissions" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "code" text NOT NULL UNIQUE,
+        "module" text NOT NULL,
+        "description" text NOT NULL,
+        "created_at" timestamptz DEFAULT now() NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS "public"."role_permissions" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "role_id" uuid NOT NULL REFERENCES "public"."roles"("id") ON DELETE CASCADE,
+        "permission_id" uuid NOT NULL REFERENCES "public"."permissions"("id") ON DELETE CASCADE,
+        "created_at" timestamptz DEFAULT now() NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_role_permission ON public.role_permissions USING btree (role_id, permission_id);
+
+      CREATE TABLE IF NOT EXISTS "public"."user_roles" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "user_id" uuid NOT NULL REFERENCES "public"."users"("id") ON DELETE CASCADE,
+        "role_id" uuid NOT NULL REFERENCES "public"."roles"("id") ON DELETE CASCADE,
+        "assigned_by" uuid REFERENCES "public"."users"("id"),
+        "status" text DEFAULT 'ACTIVE' NOT NULL,
+        "assigned_at" timestamptz DEFAULT now() NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_user_role ON public.user_roles USING btree (user_id, role_id);
+
+      CREATE TABLE IF NOT EXISTS "public"."user_permissions" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "user_id" uuid NOT NULL REFERENCES "public"."users"("id") ON DELETE CASCADE,
+        "permission_code" text NOT NULL,
+        "granted_by" uuid REFERENCES "public"."users"("id") ON DELETE SET NULL,
+        "created_at" timestamptz DEFAULT now() NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_user_permission_flag ON public.user_permissions USING btree (user_id, permission_code);
+
+      CREATE TABLE IF NOT EXISTS "public"."user_sessions" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "user_id" uuid NOT NULL REFERENCES "public"."users"("id") ON DELETE CASCADE,
+        "token_hash" text NOT NULL UNIQUE,
+        "device_label" text NOT NULL,
+        "user_agent" text,
+        "ip_hash" text,
+        "active_role_code" text NOT NULL,
+        "mfa_verified_at" timestamptz,
+        "expires_at" timestamptz NOT NULL,
+        "revoked_at" timestamptz,
+        "last_seen_at" timestamptz DEFAULT now() NOT NULL,
+        "created_at" timestamptz DEFAULT now() NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON public.user_sessions USING btree (user_id, expires_at);
+
+      CREATE TABLE IF NOT EXISTS "public"."verification_tokens" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "user_id" uuid REFERENCES "public"."users"("id") ON DELETE CASCADE,
+        "channel" text NOT NULL,
+        "target" text NOT NULL,
+        "code_hash" text NOT NULL,
+        "attempts" integer DEFAULT 0 NOT NULL,
+        "expires_at" timestamptz NOT NULL,
+        "consumed_at" timestamptz,
+        "created_at" timestamptz DEFAULT now() NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS "public"."audit_logs" (
+        "id" uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+        "actor_user_id" uuid REFERENCES "public"."users"("id"),
+        "actor_role" text NOT NULL,
+        "action" text NOT NULL,
+        "entity_type" text NOT NULL,
+        "entity_id" text,
+        "ip_hash" text,
+        "details_json" jsonb,
+        "created_at" timestamptz DEFAULT now() NOT NULL
+      );
+    `)
+  );
+}
+
+export async function ensureSeededSuperAdmin(): Promise<void> {
+  const adminEmail = (process.env.SUPER_ADMIN_EMAIL || 'gadmoz@gmail.com').trim().toLowerCase();
+  const adminPassword = process.env.SUPER_ADMIN_PASSWORD || 'Jayden@Arabella123';
+
+  let [superAdminRole] = await withDbRetry(() =>
+    db
+      .select()
+      .from(roles)
+      .where(eq(roles.code, 'SUPER_ADMIN'))
+      .limit(1)
+  );
+  if (!superAdminRole) {
+    const [insertedRole] = await withDbRetry(() =>
+      db
+        .insert(roles)
+        .values({
+          code: 'SUPER_ADMIN',
+          name: 'Super Admin',
+          description: 'Platform governance, verification approval, safeguarding oversight, and financial authority.',
+          isBeneficiaryRole: false,
+          isPrivileged: true,
+          requiresMfa: true,
+          selfAssignable: false,
+        })
+        .onConflictDoNothing({ target: roles.code })
+        .returning()
+    );
+    superAdminRole =
+      insertedRole ||
+      (await withDbRetry(() =>
+        db.select().from(roles).where(eq(roles.code, 'SUPER_ADMIN')).limit(1)
+      ))[0];
+  }
+  if (!superAdminRole) return;
+
+  const [existing] = await withDbRetry(() =>
+    db
+      .select()
+      .from(users)
+      .where(eq(users.email, adminEmail))
+      .limit(1)
+  );
+
+  let adminUserId: string;
+  if (!existing) {
+    const passwordHash = await hashPassword(adminPassword);
+    const [created] = await withDbRetry(() =>
+      db
+        .insert(users)
+        .values({
+          email: adminEmail,
+          fullName: 'Super Admin',
+          passwordHash,
+          countryCode: 'KE',
+          emailVerifiedAt: new Date(),
+          phoneVerifiedAt: new Date(),
+          approvalStatus: 'ACTIVE',
+        })
+        .returning()
+    );
+    adminUserId = created.id;
+  } else {
+    adminUserId = existing.id;
+    const passwordMatches = existing.passwordHash
+      ? await verifyPassword(adminPassword, existing.passwordHash).catch(() => false)
+      : false;
+    if (!passwordMatches || existing.approvalStatus !== 'ACTIVE' || existing.failedLoginAttempts > 0 || existing.lockedUntil) {
+      const nextHash = passwordMatches && existing.passwordHash
+        ? existing.passwordHash
+        : await hashPassword(adminPassword);
+      await withDbRetry(() =>
+        db
+          .update(users)
+          .set({
+            passwordHash: nextHash,
+            approvalStatus: 'ACTIVE',
+            failedLoginAttempts: 0,
+            lockedUntil: null,
+            emailVerifiedAt: existing.emailVerifiedAt || new Date(),
+            phoneVerifiedAt: existing.phoneVerifiedAt || new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(users.id, existing.id))
+      );
+    }
+  }
+
+  await withDbRetry(() =>
+    db
+      .insert(userRoles)
+      .values({
+        userId: adminUserId,
+        roleId: superAdminRole.id,
+        assignedBy: adminUserId,
+        status: 'ACTIVE',
+      })
+      .onConflictDoUpdate({
+        target: [userRoles.userId, userRoles.roleId],
+        set: { status: 'ACTIVE' },
+      })
+  );
+}
+
 async function runSeed(): Promise<void> {
   // Fast-path check: skip 180+ redundant seed round-trips when reference data is already seeded
   const fastCheck = await withDbRetry(
@@ -44,15 +269,25 @@ async function runSeed(): Promise<void> {
         perms_count: number;
         cats_count: number;
         staff_count: number;
+        has_sessions: boolean;
+        has_user_perms: boolean;
       }>(`
         SELECT
           (SELECT count(*)::int FROM roles) AS roles_count,
           (SELECT count(*)::int FROM permissions) AS perms_count,
           (SELECT count(*)::int FROM needs_categories) AS cats_count,
-          (SELECT count(*)::int FROM staff_positions) AS staff_count
+          (SELECT count(*)::int FROM staff_positions) AS staff_count,
+          (to_regclass('public.user_sessions') IS NOT NULL) AS has_sessions,
+          (to_regclass('public.user_permissions') IS NOT NULL) AS has_user_perms
       `),
     2
   ).catch(() => null);
+
+  if (!fastCheck?.rows?.[0] || !fastCheck.rows[0].has_sessions || !fastCheck.rows[0].has_user_perms) {
+    await ensureCoreAuthSchema().catch((schemaErr) => {
+      console.warn('Core auth schema check warning:', schemaErr);
+    });
+  }
 
   if (
     fastCheck?.rows?.[0] &&
@@ -61,6 +296,7 @@ async function runSeed(): Promise<void> {
     fastCheck.rows[0].cats_count >= 15 &&
     fastCheck.rows[0].staff_count >= STAFF_ESTABLISHMENT_170.length
   ) {
+    await ensureSeededSuperAdmin();
     return;
   }
 
@@ -272,6 +508,9 @@ async function runSeed(): Promise<void> {
         .onConflictDoNothing();
     }
   }
+
+  // Ensure configured Super Admin account is seeded with active SUPER_ADMIN role
+  await ensureSeededSuperAdmin();
 
   // 3. 15 Needs Categories
   const categorySeeds = [

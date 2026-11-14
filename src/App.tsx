@@ -6,6 +6,8 @@ import {
   X,
   LogOut,
   Lock,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import {
@@ -28,13 +30,14 @@ type AppRoute = 'public' | 'staff' | 'auth' | 'portal' | 'security';
 const HumanityConnectShell: React.FC = () => {
   const { user, loading, switchRole, loginWithPassword, signInWithGoogle, logout } = useAuth();
   const [route, setRoute] = useState<AppRoute>('public');
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
   const [presetRole, setPresetRole] = useState<string>('SUPPORTIVE');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const [spModalOpen, setSpModalOpen] = useState(false);
   const [spEmail, setSpEmail] = useState('');
   const [spPassword, setSpPassword] = useState('');
+  const [spShowPassword, setSpShowPassword] = useState(false);
   const [spBusy, setSpBusy] = useState(false);
   const [spError, setSpError] = useState<string | null>(null);
 
@@ -45,7 +48,7 @@ const HumanityConnectShell: React.FC = () => {
     fundName?: string;
   } | null>(null);
 
-  const openAuth = (mode: 'login' | 'register', role = 'SUPPORTIVE') => {
+  const openAuth = (mode: 'login' | 'register' | 'reset', role = 'SUPPORTIVE') => {
     setAuthMode(mode);
     setPresetRole(role);
     setRoute('auth');
@@ -315,6 +318,10 @@ const HumanityConnectShell: React.FC = () => {
             initialMode={authMode}
             presetRole={presetRole}
             onSuccess={() => setRoute('portal')}
+            onOpenSuperAdmin={() => {
+              setSpError(null);
+              setSpModalOpen(true);
+            }}
           />
         ) : route === 'security' && user ? (
           <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-5">
@@ -394,6 +401,7 @@ const HumanityConnectShell: React.FC = () => {
         subtitle="Authorised platform governance, verification & safeguarding access"
         onClose={() => {
           setSpModalOpen(false);
+          setSpShowPassword(false);
           setSpError(null);
         }}
       >
@@ -401,13 +409,21 @@ const HumanityConnectShell: React.FC = () => {
           className="space-y-4"
           onSubmit={async (e) => {
             e.preventDefault();
+            const fd = new FormData(e.currentTarget);
+            const emailVal = String(fd.get('email') ?? spEmail).trim();
+            const passwordVal = String(fd.get('password') ?? spPassword);
+            if (!emailVal || !passwordVal) {
+              setSpError('Please enter both your administrator email and password.');
+              return;
+            }
             setSpBusy(true);
             setSpError(null);
             try {
-              await loginWithPassword(spEmail, spPassword);
+              await loginWithPassword(emailVal, passwordVal);
               setSpModalOpen(false);
               setSpEmail('');
               setSpPassword('');
+              setSpShowPassword(false);
               setRoute('portal');
             } catch (err: any) {
               setSpError(err.message || 'Super Admin sign in failed.');
@@ -422,11 +438,14 @@ const HumanityConnectShell: React.FC = () => {
             </div>
           )}
           <div>
-            <label className="block text-xs font-semibold text-[#102E36] mb-1">
+            <label htmlFor="sp-admin-email" className="block text-xs font-semibold text-[#102E36] mb-1">
               Administrator Email
             </label>
             <input
+              id="sp-admin-email"
+              name="email"
               type="email"
+              autoComplete="username"
               required
               value={spEmail}
               onChange={(e) => setSpEmail(e.target.value)}
@@ -435,17 +454,44 @@ const HumanityConnectShell: React.FC = () => {
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-[#102E36] mb-1">
-              Administrator Password
-            </label>
-            <input
-              type="password"
-              required
-              value={spPassword}
-              onChange={(e) => setSpPassword(e.target.value)}
-              placeholder="Enter password"
-              className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
-            />
+            <div className="flex items-center justify-between mb-1">
+              <label htmlFor="sp-admin-password" className="block text-xs font-semibold text-[#102E36]">
+                Administrator Password
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  setSpModalOpen(false);
+                  setSpShowPassword(false);
+                  setSpError(null);
+                  openAuth('reset');
+                }}
+                className="text-[11px] font-semibold text-[#287A59] hover:underline"
+              >
+                Forgot password?
+              </button>
+            </div>
+            <div className="relative">
+              <input
+                id="sp-admin-password"
+                name="password"
+                type={spShowPassword ? 'text' : 'password'}
+                autoComplete="current-password"
+                required
+                value={spPassword}
+                onChange={(e) => setSpPassword(e.target.value)}
+                placeholder="Enter password"
+                className="w-full pl-3.5 pr-10 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
+              />
+              <button
+                type="button"
+                aria-label={spShowPassword ? 'Hide password' : 'Show password'}
+                onClick={() => setSpShowPassword((prev) => !prev)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[#4A636A] hover:text-[#102E36]"
+              >
+                {spShowPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2.5 pt-1">
             <GlossyButton type="submit" variant="teal" className="flex-1" disabled={spBusy}>
@@ -462,6 +508,7 @@ const HumanityConnectShell: React.FC = () => {
                 try {
                   await signInWithGoogle();
                   setSpModalOpen(false);
+                  setSpShowPassword(false);
                   setRoute('portal');
                 } catch (err: any) {
                   setSpError(err.message || 'Google Sign-In failed.');

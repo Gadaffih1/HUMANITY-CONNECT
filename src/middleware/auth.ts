@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
-import { eq, and, isNull, gt } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { eq, and, isNull, gt, inArray } from 'drizzle-orm';
+import { db, withDbRetry } from '../db/index.ts';
 import {
   users,
   roles,
@@ -42,17 +42,21 @@ export async function loadUserAuthContext(
   mfaVerifiedInSession = false,
   sessionId?: string
 ): Promise<AuthenticatedContext | null> {
-  const [userRow] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  const [userRow] = await withDbRetry(() =>
+    db.select().from(users).where(eq(users.id, userId)).limit(1)
+  );
   if (!userRow) return null;
 
-  const assignedRoles = await db
-    .select({
-      roleId: roles.id,
-      roleCode: roles.code,
-    })
-    .from(userRoles)
-    .innerJoin(roles, eq(userRoles.roleId, roles.id))
-    .where(and(eq(userRoles.userId, userRow.id), eq(userRoles.status, 'ACTIVE')));
+  const assignedRoles = await withDbRetry(() =>
+    db
+      .select({
+        roleId: roles.id,
+        roleCode: roles.code,
+      })
+      .from(userRoles)
+      .innerJoin(roles, eq(userRoles.roleId, roles.id))
+      .where(and(eq(userRoles.userId, userRow.id), eq(userRoles.status, 'ACTIVE')))
+  );
 
   const roleCodes = assignedRoles.map((r) => r.roleCode as RoleCode);
   if (roleCodes.length === 0) {
@@ -62,21 +66,31 @@ export async function loadUserAuthContext(
   const roleIds = assignedRoles.map((r) => r.roleId);
   const permSet = new Set<string>();
   if (roleIds.length > 0) {
-    for (const rId of roleIds) {
-      const rp = await db
+    const rp = await withDbRetry(() =>
+      db
         .select({ code: permissions.code })
         .from(rolePermissions)
         .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
-        .where(eq(rolePermissions.roleId, rId));
-      rp.forEach((p) => permSet.add(p.code));
-    }
+        .where(inArray(rolePermissions.roleId, roleIds))
+    );
+    rp.forEach((p) => permSet.add(p.code));
   }
 
-  const directPerms = await db
-    .select({ code: userPermissions.permissionCode })
-    .from(userPermissions)
-    .where(eq(userPermissions.userId, userRow.id));
-  directPerms.forEach((p) => permSet.add(p.code));
+  try {
+    const directPerms = await withDbRetry(() =>
+      db
+        .select({ code: userPermissions.permissionCode })
+        .from(userPermissions)
+        .where(eq(userPermissions.userId, userRow.id))
+    );
+    directPerms.forEach((p) => permSet.add(p.code));
+  } catch (permErr: any) {
+    // Gracefully degrade if direct user_permissions table has not yet been migrated on an external DB
+    const code = permErr?.code || permErr?.cause?.code;
+    if (code !== '42P01') {
+      throw permErr;
+    }
+  }
 
   const activeRole: RoleCode =
     requestedRole && roleCodes.includes(requestedRole as RoleCode)
@@ -118,31 +132,44 @@ function parseCookieValue(cookieHeader: string | undefined, name: string): strin
   return null;
 }
 
+function isHttpsRequest(req: Request): boolean {
+  const rawProto = req.headers['x-forwarded-proto'];
+  const protoHeader = Array.isArray(rawProto) ? rawProto[0] : rawProto;
+  const firstProto = String(protoHeader || '').split(',')[0].trim().toLowerCase();
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin.toLowerCase() : '';
+  return req.secure || firstProto === 'https' || origin.startsWith('https://');
+}
+
 export function setSessionCookie(req: Request, res: Response, token: string): void {
-  const isHttps =
-    req.secure ||
-    req.headers['x-forwarded-proto'] === 'https' ||
-    process.env.NODE_ENV === 'production';
-  res.cookie(SESSION_COOKIE_NAME, token, {
-    httpOnly: true,
-    path: '/',
-    maxAge: 24 * 60 * 60 * 1000,
-    sameSite: isHttps ? 'none' : 'lax',
-    secure: isHttps,
-  });
+  const isHttps = isHttpsRequest(req);
+  const maxAgeSeconds = 24 * 60 * 60;
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    `Max-Age=${maxAgeSeconds}`,
+    'HttpOnly',
+    isHttps ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (isHttps) {
+    parts.push('Secure', 'Partitioned');
+  }
+  res.append('Set-Cookie', parts.join('; '));
 }
 
 export function clearSessionCookie(req: Request, res: Response): void {
-  const isHttps =
-    req.secure ||
-    req.headers['x-forwarded-proto'] === 'https' ||
-    process.env.NODE_ENV === 'production';
-  res.clearCookie(SESSION_COOKIE_NAME, {
-    httpOnly: true,
-    path: '/',
-    sameSite: isHttps ? 'none' : 'lax',
-    secure: isHttps,
-  });
+  const isHttps = isHttpsRequest(req);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'Max-Age=0',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+    'HttpOnly',
+    isHttps ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (isHttps) {
+    parts.push('Secure', 'Partitioned');
+  }
+  res.append('Set-Cookie', parts.join('; '));
 }
 
 export async function resolveAuthFromRequest(req: Request): Promise<AuthenticatedContext | null> {
@@ -163,25 +190,28 @@ export async function resolveAuthFromRequest(req: Request): Promise<Authenticate
     const payload = verifySessionToken(token);
     if (!payload) return null;
     const tokenHash = sha256Hex(token);
-    const [session] = await db
-      .select()
-      .from(userSessions)
-      .where(
-        and(
-          eq(userSessions.id, payload.sid),
-          eq(userSessions.tokenHash, tokenHash),
-          isNull(userSessions.revokedAt),
-          gt(userSessions.expiresAt, new Date())
+    const [session] = await withDbRetry(() =>
+      db
+        .select()
+        .from(userSessions)
+        .where(
+          and(
+            eq(userSessions.id, payload.sid),
+            eq(userSessions.tokenHash, tokenHash),
+            isNull(userSessions.revokedAt),
+            gt(userSessions.expiresAt, new Date())
+          )
         )
-      )
-      .limit(1);
+        .limit(1)
+    );
 
     if (!session) return null;
 
     await db
       .update(userSessions)
       .set({ lastSeenAt: new Date() })
-      .where(eq(userSessions.id, session.id));
+      .where(eq(userSessions.id, session.id))
+      .catch(() => {});
 
     return loadUserAuthContext(
       session.userId,
@@ -260,7 +290,8 @@ export async function resolveAuthFromRequest(req: Request): Promise<Authenticate
     }
 
     return loadUserAuthContext(userRecord.id, headerActiveRole, false);
-  } catch {
+  } catch (err) {
+    console.warn('Firebase ID token verification failed:', err instanceof Error ? err.message : err);
     return null;
   }
 }

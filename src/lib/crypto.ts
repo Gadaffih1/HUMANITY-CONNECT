@@ -3,12 +3,26 @@ import crypto from 'node:crypto';
 const runtimeFallbackSecret = crypto.randomBytes(32).toString('hex');
 
 function getSessionSecret(): string {
-  return process.env.SESSION_SIGNING_SECRET || runtimeFallbackSecret;
+  const configured = process.env.SESSION_SIGNING_SECRET?.trim();
+  if (configured && !configured.startsWith('REPLACE_')) {
+    return configured;
+  }
+  const serverSecretMaterial =
+    process.env.ENCRYPTION_MASTER_KEY?.trim() ||
+    process.env.DATABASE_URL?.trim() ||
+    process.env.SQL_PASSWORD?.trim();
+  if (serverSecretMaterial && !serverSecretMaterial.startsWith('REPLACE_')) {
+    return crypto
+      .createHmac('sha256', serverSecretMaterial)
+      .update('humanity-connect-session-signing-v1')
+      .digest('hex');
+  }
+  return runtimeFallbackSecret;
 }
 
 function getEncryptionKey(): Buffer {
-  const envKey = process.env.ENCRYPTION_MASTER_KEY;
-  if (envKey && envKey.length >= 32) {
+  const envKey = process.env.ENCRYPTION_MASTER_KEY?.trim();
+  if (envKey && !envKey.startsWith('REPLACE_') && envKey.length >= 32) {
     return crypto.createHash('sha256').update(envKey).digest();
   }
   return crypto.createHash('sha256').update(getSessionSecret()).digest();
@@ -26,18 +40,27 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const parts = stored.split(':');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  const [, salt, hashHex] = parts;
-  const derived = await new Promise<Buffer>((resolve, reject) => {
-    crypto.scrypt(password, salt, 64, (err, key) => {
-      if (err) reject(err);
-      else resolve(key);
+  try {
+    if (!password || typeof stored !== 'string') return false;
+    const parts = stored.trim().split(':');
+    if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+    const [, salt, hashHex] = parts;
+    if (!salt || !hashHex || hashHex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hashHex)) {
+      return false;
+    }
+    const storedBuf = Buffer.from(hashHex, 'hex');
+    if (storedBuf.length === 0) return false;
+    const derived = await new Promise<Buffer>((resolve, reject) => {
+      crypto.scrypt(password, salt, storedBuf.length, (err, key) => {
+        if (err) reject(err);
+        else resolve(key);
+      });
     });
-  });
-  const storedBuf = Buffer.from(hashHex, 'hex');
-  if (storedBuf.length !== derived.length) return false;
-  return crypto.timingSafeEqual(storedBuf, derived);
+    if (storedBuf.length !== derived.length) return false;
+    return crypto.timingSafeEqual(storedBuf, derived);
+  } catch {
+    return false;
+  }
 }
 
 export function sha256Hex(value: string): string {
