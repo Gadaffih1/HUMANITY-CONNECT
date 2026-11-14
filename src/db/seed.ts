@@ -20,7 +20,7 @@ import {
   matchingEngineConfig,
   staffPositions,
 } from './schema.ts';
-import { encryptSensitiveText, hashPassword, verifyPassword } from '../lib/crypto.ts';
+import { encryptSensitiveText, hashPassword } from '../lib/crypto.ts';
 import { STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
 
 let seedPromise: Promise<void> | null = null;
@@ -33,77 +33,6 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
     });
   }
   return seedPromise;
-}
-
-async function ensureSeededSuperAdmin(): Promise<void> {
-  const adminEmail = (process.env.SUPER_ADMIN_EMAIL || 'gadmoz@gmail.com').trim().toLowerCase();
-  const adminPassword = process.env.SUPER_ADMIN_PASSWORD || 'Jayden@Arabella123';
-
-  const [superAdminRole] = await db
-    .select()
-    .from(roles)
-    .where(eq(roles.code, 'SUPER_ADMIN'))
-    .limit(1);
-  if (!superAdminRole) return;
-
-  const [existing] = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, adminEmail))
-    .limit(1);
-
-  let adminUserId: string;
-  if (!existing) {
-    const passwordHash = await hashPassword(adminPassword);
-    const [created] = await db
-      .insert(users)
-      .values({
-        email: adminEmail,
-        fullName: 'Super Admin',
-        passwordHash,
-        countryCode: 'KE',
-        emailVerifiedAt: new Date(),
-        phoneVerifiedAt: new Date(),
-        approvalStatus: 'ACTIVE',
-      })
-      .returning();
-    adminUserId = created.id;
-  } else {
-    adminUserId = existing.id;
-    const passwordMatches = existing.passwordHash
-      ? await verifyPassword(adminPassword, existing.passwordHash).catch(() => false)
-      : false;
-    if (!passwordMatches || existing.approvalStatus !== 'ACTIVE' || existing.failedLoginAttempts > 0 || existing.lockedUntil) {
-      const nextHash = passwordMatches && existing.passwordHash
-        ? existing.passwordHash
-        : await hashPassword(adminPassword);
-      await db
-        .update(users)
-        .set({
-          passwordHash: nextHash,
-          approvalStatus: 'ACTIVE',
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-          emailVerifiedAt: existing.emailVerifiedAt || new Date(),
-          phoneVerifiedAt: existing.phoneVerifiedAt || new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, existing.id));
-    }
-  }
-
-  await db
-    .insert(userRoles)
-    .values({
-      userId: adminUserId,
-      roleId: superAdminRole.id,
-      assignedBy: adminUserId,
-      status: 'ACTIVE',
-    })
-    .onConflictDoUpdate({
-      target: [userRoles.userId, userRoles.roleId],
-      set: { status: 'ACTIVE' },
-    });
 }
 
 async function runSeed(): Promise<void> {
@@ -132,7 +61,6 @@ async function runSeed(): Promise<void> {
     fastCheck.rows[0].cats_count >= 15 &&
     fastCheck.rows[0].staff_count >= STAFF_ESTABLISHMENT_170.length
   ) {
-    await ensureSeededSuperAdmin();
     return;
   }
 
@@ -344,9 +272,6 @@ async function runSeed(): Promise<void> {
         .onConflictDoNothing();
     }
   }
-
-  // Ensure configured Super Admin account is seeded with active SUPER_ADMIN role
-  await ensureSeededSuperAdmin();
 
   // 3. 15 Needs Categories
   const categorySeeds = [

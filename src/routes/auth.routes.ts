@@ -3,6 +3,7 @@ import { z } from 'zod';
 import crypto from 'node:crypto';
 import { eq, and, desc, isNull, gt, ne } from 'drizzle-orm';
 import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
+import { provisionSuperAdmin } from '../db/superAdmin.ts';
 import {
   users,
   roles,
@@ -910,61 +911,26 @@ authRouter.post('/provision-super-admin', async (req, res) => {
     return res.status(400).json({ error: 'Provide email, fullName, phoneE164, and 12+ char password.' });
   }
 
-  const [superAdminRole] = await db
-    .select()
-    .from(roles)
-    .where(eq(roles.code, 'SUPER_ADMIN'))
-    .limit(1);
-  if (!superAdminRole) return res.status(500).json({ error: 'Role registry missing.' });
-
-  const existingSuperAdmins = await db
-    .select()
-    .from(userRoles)
-    .where(eq(userRoles.roleId, superAdminRole.id))
-    .limit(1);
-
-  if (existingSuperAdmins.length > 0) {
-    return res.status(409).json({
-      error: 'Initial Super Admin has already been provisioned. Use an existing Super Admin session with MFA to assign additional officers.',
-    });
-  }
-
-  const totpSecret = generateTotpSecret();
-  const passwordHash = await hashPassword(parsed.data.password);
-  const [adminUser] = await db
-    .insert(users)
-    .values({
+  try {
+    const result = await provisionSuperAdmin({
       email: parsed.data.email.trim().toLowerCase(),
       fullName: parsed.data.fullName.trim(),
       phoneE164: parsed.data.phoneE164.trim(),
-      passwordHash,
-      emailVerifiedAt: new Date(),
-      phoneVerifiedAt: new Date(),
-      mfaEnabled: true,
-      mfaSecretEnc: encryptSensitiveText(totpSecret),
-      approvalStatus: 'ACTIVE',
-    })
-    .returning();
-
-  await db.insert(userRoles).values({
-    userId: adminUser.id,
-    roleId: superAdminRole.id,
-    assignedBy: adminUser.id,
-    status: 'ACTIVE',
-  });
-
-  await writeAuditLog({
-    actorUserId: adminUser.id,
-    actorRole: 'SUPER_ADMIN',
-    action: 'FIRST_SUPER_ADMIN_PROVISIONED',
-    entityType: 'users',
-    entityId: adminUser.id,
-    ip: req.ip,
-  });
-
-  res.status(201).json({
-    provisioned: true,
-    userId: adminUser.id,
-    mfaTotpSecret: totpSecret,
-  });
+      password: parsed.data.password,
+      ip: req.ip,
+    });
+    if (!result) {
+      return res.status(409).json({
+        error: 'Initial Super Admin has already been provisioned. Use an existing Super Admin session with MFA to assign additional officers.',
+      });
+    }
+    return res.status(201).json({
+      provisioned: true,
+      userId: result.userId,
+      mfaTotpSecret: result.totpSecret,
+    });
+  } catch (err) {
+    console.error('Super Admin provisioning failed:', err);
+    return res.status(500).json({ error: 'Unable to provision Super Admin. Check server configuration and account ownership.' });
+  }
 });
