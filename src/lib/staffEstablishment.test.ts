@@ -15,6 +15,12 @@ import {
   STAFF_EMPLOYMENT_STATUSES,
 } from '../types/domain.ts';
 import {
+  calculateSmsUnits,
+  mapTalkSasaDlrStatus,
+  maskSensitiveSmsText,
+  normalizeKenyanMsisdn,
+} from './talksasaUtils.ts';
+import {
   buildDefaultOnboardingMilestones,
   buildOnboardingDashboardMetrics,
   buildPendingMilestonesTimeline,
@@ -261,4 +267,52 @@ test('Onboarding Progress Dashboard metrics and pending timeline sort blockers &
   assert.equal(timeline[3].checklistId, 'chk-a');
   assert.equal(timeline[3].phaseOrder, 1);
 });
+
+test('TalkSasa MSISDN normalization solves +254, 07, 01, 25407, spaces, and invalid prefixes', () => {
+  const plus254 = normalizeKenyanMsisdn('+254 712-345-678');
+  assert.equal(plus254.ok, true);
+  assert.equal(plus254.msisdn, '254712345678');
+  assert.equal(plus254.e164, '+254712345678');
+  assert.equal(plus254.masked, '254712****78');
+
+  const local07 = normalizeKenyanMsisdn('0729620384');
+  assert.equal(local07.ok, true);
+  assert.equal(local07.msisdn, '254729620384');
+  assert.equal(local07.e164, '+254729620384');
+
+  const local01 = normalizeKenyanMsisdn('0110445566');
+  assert.equal(local01.ok, true);
+  assert.equal(local01.msisdn, '254110445566');
+
+  const typo25407 = normalizeKenyanMsisdn('+2540712345678');
+  assert.equal(typo25407.ok, true);
+  assert.equal(typo25407.msisdn, '254712345678');
+
+  const invalid254 = normalizeKenyanMsisdn('254512345678');
+  assert.equal(invalid254.ok, false);
+
+  const empty = normalizeKenyanMsisdn('');
+  assert.equal(empty.ok, false);
+});
+
+test('TalkSasa helper redacts OTP digits, counts GSM vs Unicode SMS units, and maps DLR statuses', () => {
+  const redacted = maskSensitiveSmsText('Your verification code is 482910. Expires in 10 minutes.', 'OTP');
+  assert.equal(redacted.includes('482910'), false);
+  assert.equal(redacted.includes('******'), true);
+
+  const generalMsg = maskSensitiveSmsText('Disbursement KES 5000 approved for case 2026.', 'CASE_STATUS');
+  assert.equal(generalMsg.includes('5000'), true);
+
+  assert.equal(calculateSmsUnits('Short GSM text message'), 1);
+  assert.equal(calculateSmsUnits('A'.repeat(161)), 2);
+  assert.equal(calculateSmsUnits('Hello 🌍'), 1);
+  assert.equal(calculateSmsUnits('🌍'.repeat(40)), 2);
+
+  assert.equal(mapTalkSasaDlrStatus('DELIVRD'), 'DELIVERED');
+  assert.equal(mapTalkSasaDlrStatus('UNDELIV'), 'REJECTED');
+  assert.equal(mapTalkSasaDlrStatus('ERROR'), 'FAILED');
+  assert.equal(mapTalkSasaDlrStatus('DISPATCHED'), 'SENT');
+  assert.equal(mapTalkSasaDlrStatus('UNKNOWN'), 'QUEUED');
+});
+
 

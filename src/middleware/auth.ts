@@ -103,10 +103,54 @@ export async function loadUserAuthContext(
   };
 }
 
+export const SESSION_COOKIE_NAME = 'hc_session';
+
+function parseCookieValue(cookieHeader: string | undefined, name: string): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key === name) {
+      return decodeURIComponent(part.slice(idx + 1).trim());
+    }
+  }
+  return null;
+}
+
+export function setSessionCookie(req: Request, res: Response, token: string): void {
+  const isHttps =
+    req.secure ||
+    req.headers['x-forwarded-proto'] === 'https' ||
+    process.env.NODE_ENV === 'production';
+  res.cookie(SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    path: '/',
+    maxAge: 24 * 60 * 60 * 1000,
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: isHttps,
+  });
+}
+
+export function clearSessionCookie(req: Request, res: Response): void {
+  const isHttps =
+    req.secure ||
+    req.headers['x-forwarded-proto'] === 'https' ||
+    process.env.NODE_ENV === 'production';
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    path: '/',
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: isHttps,
+  });
+}
+
 export async function resolveAuthFromRequest(req: Request): Promise<AuthenticatedContext | null> {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
-  const token = authHeader.slice(7).trim();
+  const bearerToken =
+    authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const cookieToken = parseCookieValue(req.headers.cookie, SESSION_COOKIE_NAME);
+  const token = bearerToken || cookieToken;
   if (!token) return null;
 
   const headerActiveRole =

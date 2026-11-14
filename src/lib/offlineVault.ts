@@ -1,88 +1,87 @@
-// Client-side WebCrypto AES-GCM encrypted offline vault for Field Operations
-// Sensitive drafts are encrypted in-device while offline and securely wiped immediately after server sync.
-
-const STORAGE_KEY = 'hc_field_encrypted_vault_v1';
-const KEY_STORAGE = 'hc_field_ephemeral_key_v1';
+// Cloud SQL PostgreSQL-backed encrypted field draft vault
+// Zero browser-local persistence (no localStorage / sessionStorage): all drafts remain strictly in PostgreSQL across all browsers.
 
 export interface OfflineFieldRecord {
   localId: string;
+  id?: string;
   recordType: 'FIELD_VISIT' | 'BENEFICIARY_INTAKE' | 'CONSENT_CAPTURE' | 'EMERGENCY_REPORT';
   county: string;
+  caseId?: string | null;
   capturedAt: string;
   payload: Record<string, unknown>;
 }
 
-interface EncryptedEnvelope {
-  localId: string;
-  ivB64: string;
-  cipherB64: string;
-  capturedAt: string;
-}
-
-async function getOrCreateLocalKey(): Promise<CryptoKey> {
-  const existing = sessionStorage.getItem(KEY_STORAGE);
-  if (existing) {
-    const raw = Uint8Array.from(atob(existing), (c) => c.charCodeAt(0));
-    return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+function buildHeaders(authToken?: string | null): HeadersInit {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
   }
-  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
-  const exported = new Uint8Array(await crypto.subtle.exportKey('raw', key));
-  sessionStorage.setItem(KEY_STORAGE, btoa(String.fromCharCode(...exported)));
-  return key;
+  return headers;
 }
 
-export async function saveEncryptedOfflineRecord(record: OfflineFieldRecord): Promise<void> {
-  const key = await getOrCreateLocalKey();
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encoded = new TextEncoder().encode(JSON.stringify(record));
-  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
-
-  const listRaw = localStorage.getItem(STORAGE_KEY);
-  const list: EncryptedEnvelope[] = listRaw ? JSON.parse(listRaw) : [];
-
-  list.push({
-    localId: record.localId,
-    ivB64: btoa(String.fromCharCode(...iv)),
-    cipherB64: btoa(String.fromCharCode(...new Uint8Array(cipherBuf))),
-    capturedAt: record.capturedAt,
+export async function saveEncryptedOfflineRecord(
+  record: OfflineFieldRecord,
+  authToken?: string | null
+): Promise<OfflineFieldRecord> {
+  const res = await fetch('/api/operations/field-drafts', {
+    method: 'POST',
+    credentials: 'include',
+    headers: buildHeaders(authToken),
+    body: JSON.stringify({
+      recordType: record.recordType,
+      county: record.county,
+      caseId: (record.payload?.caseId as string | null | undefined) || record.caseId || null,
+      payload: record.payload,
+    }),
   });
-
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-}
-
-export async function listEncryptedOfflineRecords(): Promise<OfflineFieldRecord[]> {
-  const listRaw = localStorage.getItem(STORAGE_KEY);
-  if (!listRaw) return [];
-  const list: EncryptedEnvelope[] = JSON.parse(listRaw);
-  if (list.length === 0) return [];
-
-  const key = await getOrCreateLocalKey();
-  const decrypted: OfflineFieldRecord[] = [];
-  for (const item of list) {
-    try {
-      const iv = Uint8Array.from(atob(item.ivB64), (c) => c.charCodeAt(0));
-      const cipher = Uint8Array.from(atob(item.cipherB64), (c) => c.charCodeAt(0));
-      const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipher);
-      decrypted.push(JSON.parse(new TextDecoder().decode(plainBuf)) as OfflineFieldRecord);
-    } catch {
-      // Skip corrupted or expired session-keyed entries
-    }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || 'Unable to save encrypted field draft to PostgreSQL.');
   }
-  return decrypted;
+  return data.draft as OfflineFieldRecord;
 }
 
-export function securelyWipeOfflineRecord(localId: string): void {
-  const listRaw = localStorage.getItem(STORAGE_KEY);
-  if (!listRaw) return;
-  const list: EncryptedEnvelope[] = JSON.parse(listRaw);
-  const remaining = list.filter((x) => x.localId !== localId);
-  if (remaining.length === 0) {
-    localStorage.removeItem(STORAGE_KEY);
-  } else {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(remaining));
+export async function listEncryptedOfflineRecords(
+  authToken?: string | null
+): Promise<OfflineFieldRecord[]> {
+  const res = await fetch('/api/operations/field-drafts', {
+    method: 'GET',
+    credentials: 'include',
+    headers: buildHeaders(authToken),
+  });
+  if (!res.ok) return [];
+  const data = (await res.json().catch(() => ({}))) as { drafts?: OfflineFieldRecord[] };
+  return Array.isArray(data.drafts) ? data.drafts : [];
+}
+
+export async function markOfflineRecordSynced(
+  draftId: string,
+  authToken?: string | null
+): Promise<void> {
+  const res = await fetch(`/api/operations/field-drafts/${encodeURIComponent(draftId)}/mark-synced`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: buildHeaders(authToken),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Unable to mark field draft as synced in PostgreSQL.');
   }
 }
 
-export function securelyWipeAllOfflineData(): void {
-  localStorage.removeItem(STORAGE_KEY);
+export async function securelyWipeOfflineRecord(
+  draftId: string,
+  authToken?: string | null
+): Promise<void> {
+  const res = await fetch(`/api/operations/field-drafts/${encodeURIComponent(draftId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+    headers: buildHeaders(authToken),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Unable to delete field draft from PostgreSQL.');
+  }
 }

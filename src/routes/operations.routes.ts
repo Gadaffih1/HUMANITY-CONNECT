@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   empowermentMilestones,
@@ -11,7 +11,9 @@ import {
   beneficiaryProfiles,
   notifications,
   safeguardingIncidents,
+  fieldDraftRecords,
 } from '../db/schema.ts';
+import { encryptSensitiveText, decryptSensitiveText } from '../lib/crypto.ts';
 import {
   requireAuth,
   requireRole,
@@ -260,3 +262,190 @@ operationsRouter.post('/privacy/dsar', async (req: AuthRequest, res) => {
 
   res.status(201).json({ reference: ref, status: 'QUEUED_FOR_DPO' });
 });
+
+// Persistent Encrypted Field Capture Drafts (Cloud SQL PostgreSQL across all browsers)
+operationsRouter.get(
+  '/field-drafts',
+  requireRole(
+    'SUPER_ADMIN',
+    'FIELD_OFFICER',
+    'COUNTY_REPRESENTATIVE',
+    'VERIFICATION_OFFICER',
+    'WELFARE_OFFICER',
+    'SAFEGUARDING_OFFICER',
+    'AUDITOR'
+  ),
+  async (req: AuthRequest, res) => {
+    try {
+      const isGlobal =
+        req.authUser!.roles.includes('SUPER_ADMIN') || req.authUser!.roles.includes('AUDITOR');
+      const rows = isGlobal
+        ? await db
+            .select()
+            .from(fieldDraftRecords)
+            .where(eq(fieldDraftRecords.syncStatus, 'PENDING'))
+            .orderBy(desc(fieldDraftRecords.capturedAt))
+            .limit(100)
+        : await db
+            .select()
+            .from(fieldDraftRecords)
+            .where(
+              and(
+                eq(fieldDraftRecords.capturedByUserId, req.authUser!.userId),
+                eq(fieldDraftRecords.syncStatus, 'PENDING')
+              )
+            )
+            .orderBy(desc(fieldDraftRecords.capturedAt))
+            .limit(100);
+
+      const drafts = rows.map((r) => {
+        let payload: Record<string, unknown> = {};
+        try {
+          payload = JSON.parse(decryptSensitiveText(r.payloadEnc)) as Record<string, unknown>;
+        } catch {
+          payload = {};
+        }
+        return {
+          localId: r.id,
+          id: r.id,
+          recordType: r.recordType,
+          county: r.county,
+          caseId: r.caseId,
+          syncStatus: r.syncStatus,
+          capturedAt: r.capturedAt.toISOString(),
+          payload,
+        };
+      });
+
+      res.json({ drafts });
+    } catch (err) {
+      console.error('Field drafts list error:', err);
+      res.status(500).json({ error: 'Unable to load saved field drafts from database.' });
+    }
+  }
+);
+
+operationsRouter.post(
+  '/field-drafts',
+  requireRole(
+    'SUPER_ADMIN',
+    'FIELD_OFFICER',
+    'COUNTY_REPRESENTATIVE',
+    'VERIFICATION_OFFICER',
+    'WELFARE_OFFICER',
+    'SAFEGUARDING_OFFICER'
+  ),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      recordType: z
+        .enum(['FIELD_VISIT', 'BENEFICIARY_INTAKE', 'CONSENT_CAPTURE', 'EMERGENCY_REPORT'])
+        .default('FIELD_VISIT'),
+      county: z.string().min(2).max(100),
+      caseId: z.string().uuid().nullable().optional(),
+      payload: z.record(z.string(), z.unknown()),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Valid field draft payload required.' });
+    }
+
+    const [created] = await db
+      .insert(fieldDraftRecords)
+      .values({
+        capturedByUserId: req.authUser!.userId,
+        caseId: parsed.data.caseId || null,
+        recordType: parsed.data.recordType,
+        county: parsed.data.county.trim(),
+        payloadEnc: encryptSensitiveText(JSON.stringify(parsed.data.payload)),
+        syncStatus: 'PENDING',
+      })
+      .returning();
+
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'FIELD_DRAFT_SAVED_DB',
+      entityType: 'field_draft_records',
+      entityId: created.id,
+      ip: req.ip,
+      details: { recordType: created.recordType, county: created.county },
+    });
+
+    res.status(201).json({
+      draft: {
+        localId: created.id,
+        id: created.id,
+        recordType: created.recordType,
+        county: created.county,
+        caseId: created.caseId,
+        syncStatus: created.syncStatus,
+        capturedAt: created.capturedAt.toISOString(),
+        payload: parsed.data.payload,
+      },
+    });
+  }
+);
+
+operationsRouter.post(
+  '/field-drafts/:id/mark-synced',
+  requireRole(
+    'SUPER_ADMIN',
+    'FIELD_OFFICER',
+    'COUNTY_REPRESENTATIVE',
+    'VERIFICATION_OFFICER',
+    'WELFARE_OFFICER',
+    'SAFEGUARDING_OFFICER'
+  ),
+  async (req: AuthRequest, res) => {
+    const [existing] = await db
+      .select()
+      .from(fieldDraftRecords)
+      .where(eq(fieldDraftRecords.id, req.params.id))
+      .limit(1);
+    if (!existing) return res.status(404).json({ error: 'Field draft not found.' });
+
+    if (
+      existing.capturedByUserId !== req.authUser!.userId &&
+      !req.authUser!.roles.includes('SUPER_ADMIN')
+    ) {
+      return res.status(403).json({ error: 'Access denied for this field draft.' });
+    }
+
+    await db
+      .update(fieldDraftRecords)
+      .set({ syncStatus: 'SYNCED', syncedAt: new Date(), updatedAt: new Date() })
+      .where(eq(fieldDraftRecords.id, existing.id));
+
+    res.json({ ok: true });
+  }
+);
+
+operationsRouter.delete(
+  '/field-drafts/:id',
+  requireRole(
+    'SUPER_ADMIN',
+    'FIELD_OFFICER',
+    'COUNTY_REPRESENTATIVE',
+    'VERIFICATION_OFFICER',
+    'WELFARE_OFFICER',
+    'SAFEGUARDING_OFFICER'
+  ),
+  async (req: AuthRequest, res) => {
+    const [existing] = await db
+      .select()
+      .from(fieldDraftRecords)
+      .where(eq(fieldDraftRecords.id, req.params.id))
+      .limit(1);
+    if (!existing) return res.status(404).json({ error: 'Field draft not found.' });
+
+    if (
+      existing.capturedByUserId !== req.authUser!.userId &&
+      !req.authUser!.roles.includes('SUPER_ADMIN')
+    ) {
+      return res.status(403).json({ error: 'Access denied for this field draft.' });
+    }
+
+    await db.delete(fieldDraftRecords).where(eq(fieldDraftRecords.id, existing.id));
+    res.json({ ok: true });
+  }
+);

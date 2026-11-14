@@ -33,7 +33,11 @@ import {
   AuthRequest,
   loadUserAuthContext,
   writeAuditLog,
+  setSessionCookie,
+  clearSessionCookie,
 } from '../middleware/auth.ts';
+import { dispatchTalksasaSms } from '../lib/talksasa.ts';
+import { normalizeKenyanMsisdn } from '../lib/talksasaUtils.ts';
 import type { RoleCode } from '../types/domain.ts';
 
 export const authRouter = Router();
@@ -99,13 +103,20 @@ authRouter.post('/register', async (req, res) => {
       return res.status(409).json({ error: 'An account with this email already exists.' });
     }
 
+    const normalizedPhone = data.phoneE164?.trim()
+      ? normalizeKenyanMsisdn(data.phoneE164.trim())
+      : null;
+    if (normalizedPhone && !normalizedPhone.ok) {
+      return res.status(400).json({ error: normalizedPhone.error || 'Invalid Kenyan phone format.' });
+    }
+
     const passwordHash = await hashPassword(data.password);
     const [newUser] = await db
       .insert(users)
       .values({
         email: normalizedEmail,
         fullName: data.fullName.trim(),
-        phoneE164: data.phoneE164?.trim() || null,
+        phoneE164: normalizedPhone?.ok ? normalizedPhone.e164 : null,
         passwordHash,
         countryCode: data.countryCode,
         approvalStatus: 'ACTIVE',
@@ -215,6 +226,13 @@ authRouter.post('/register', async (req, res) => {
         codeHash: sha256Hex(phoneOtp),
         expiresAt: new Date(Date.now() + 15 * 60 * 1000),
       });
+      await dispatchTalksasaSms({
+        recipientPhone: newUser.phoneE164,
+        message: `Humanity Connect verification code: ${phoneOtp}. Expires in 15 minutes. Do not share this code.`,
+        templateCode: 'OTP',
+        userId: newUser.id,
+        idempotencyKey: `reg-otp-${newUser.id}`,
+      }).catch((smsErr) => console.error('TalkSasa registration OTP dispatch error:', smsErr));
     }
 
     // Create initial session
@@ -250,6 +268,7 @@ authRouter.post('/register', async (req, res) => {
     });
 
     const authUser = await loadUserAuthContext(newUser.id, validRoles[0], false, sessionId);
+    setSessionCookie(req, res, token);
     res.status(201).json({
       token,
       user: authUser,
@@ -351,6 +370,7 @@ authRouter.post('/login', async (req, res) => {
     });
 
     const user = await loadUserAuthContext(userRow.id, primaryRole, false, sessionId);
+    setSessionCookie(req, res, token);
     res.json({
       token,
       user,
@@ -360,6 +380,28 @@ authRouter.post('/login', async (req, res) => {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Login failed.' });
   }
+});
+
+authRouter.post('/logout', async (req: AuthRequest, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const rawBearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    if (req.authUser?.sessionId) {
+      await db
+        .update(userSessions)
+        .set({ revokedAt: new Date() })
+        .where(eq(userSessions.id, req.authUser.sessionId));
+    } else if (rawBearer && rawBearer.startsWith('hc1.')) {
+      await db
+        .update(userSessions)
+        .set({ revokedAt: new Date() })
+        .where(eq(userSessions.tokenHash, sha256Hex(rawBearer)));
+    }
+  } catch {
+    // Best-effort revocation
+  }
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
 });
 
 authRouter.get('/me', requireAuth, async (req: AuthRequest, res) => {
@@ -399,38 +441,59 @@ authRouter.post('/switch-role', requireAuth, async (req: AuthRequest, res) => {
 
 authRouter.post('/verify-phone/send', requireAuth, async (req: AuthRequest, res) => {
   const { phoneE164 } = req.body as { phoneE164?: string };
-  const target = (phoneE164 || req.authUser!.phoneE164 || '').trim();
-  if (!target || target.length < 8) {
-    return res.status(400).json({ error: 'Valid phone number (e.g. +2547XXXXXXXX) is required.' });
+  const rawPhone = (phoneE164 || req.authUser!.phoneE164 || '').trim();
+  const norm = normalizeKenyanMsisdn(rawPhone);
+  if (!norm.ok) {
+    return res.status(400).json({
+      error: norm.error || 'Valid phone number (e.g. +2547XXXXXXXX or 07XXXXXXXX) is required.',
+    });
   }
+
   await db
     .update(users)
-    .set({ phoneE164: target })
+    .set({ phoneE164: norm.e164 })
     .where(eq(users.id, req.authUser!.userId));
 
   const otp = generateNumericOtp(6);
   await db.insert(verificationTokens).values({
     userId: req.authUser!.userId,
     channel: 'PHONE_OTP',
-    target,
+    target: norm.e164,
     codeHash: sha256Hex(otp),
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  });
+
+  const smsResult = await dispatchTalksasaSms({
+    recipientPhone: norm.e164,
+    message: `Humanity Connect OTP: ${otp}. Valid for 10 minutes.`,
+    templateCode: 'OTP',
+    userId: req.authUser!.userId,
   });
 
   await writeAuditLog({
     actorUserId: req.authUser!.userId,
     actorRole: req.authUser!.activeRole,
     action: 'PHONE_OTP_DISPATCHED',
-    entityType: 'users',
-    entityId: req.authUser!.userId,
+    entityType: 'talksasa_sms_logs',
+    entityId: smsResult.logId,
     ip: req.ip,
+    details: {
+      dispatchRef: smsResult.dispatchRef,
+      deliveryStatus: smsResult.deliveryStatus,
+      gatewayLive: smsResult.gatewayLive,
+    },
   });
 
-  // In non-SMS-gateway sandbox environments, return masked confirmation; never expose in production if SMS gateway active
   res.json({
     sent: true,
-    targetMasked: `${target.slice(0, 6)}****${target.slice(-2)}`,
-    sandboxOtp: process.env.NODE_ENV === 'production' ? undefined : otp,
+    targetMasked: norm.masked,
+    dispatchRef: smsResult.dispatchRef,
+    deliveryStatus: smsResult.deliveryStatus,
+    gatewayLive: smsResult.gatewayLive,
+    sandboxOtp:
+      process.env.NODE_ENV === 'production' || (smsResult.gatewayLive && smsResult.deliveryStatus === 'SENT')
+        ? undefined
+        : otp,
   });
 });
 

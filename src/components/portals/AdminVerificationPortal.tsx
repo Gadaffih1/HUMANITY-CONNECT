@@ -17,6 +17,8 @@ import {
   Database,
   UserPlus,
   KeyRound,
+  MessageSquare,
+  Send,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -31,6 +33,7 @@ import { AccountSecurityPanel } from '../auth/AuthScreens';
 import {
   saveEncryptedOfflineRecord,
   listEncryptedOfflineRecords,
+  markOfflineRecordSynced,
   securelyWipeOfflineRecord,
   type OfflineFieldRecord,
 } from '../../lib/offlineVault';
@@ -64,6 +67,11 @@ export const AdminVerificationPortal: React.FC = () => {
   const [projectsData, setProjectsData] = useState<any>(null);
   const [dpiaData, setDpiaData] = useState<any>(null);
   const [commCentre, setCommCentre] = useState<any>(null);
+  const [talksasaData, setTalksasaData] = useState<any>(null);
+  const [smsPhone, setSmsPhone] = useState('+2547');
+  const [smsTemplate, setSmsTemplate] = useState<'VERIFICATION' | 'PAYMENT' | 'ONBOARDING' | 'GENERAL'>('GENERAL');
+  const [smsMessage, setSmsMessage] = useState('');
+  const [smsBusy, setSmsBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -141,20 +149,21 @@ export const AdminVerificationPortal: React.FC = () => {
   const [permBusy, setPermBusy] = useState(false);
 
   const loadOffline = async () => {
-    const items = await listEncryptedOfflineRecords();
+    const items = await listEncryptedOfflineRecords(token);
     setOfflineRecords(items);
   };
 
   const loadAll = async () => {
     setErrorMsg(null);
     try {
-      const [ov, rep, guide, emp, proj, comm] = await Promise.all([
+      const [ov, rep, guide, emp, proj, comm, ts] = await Promise.all([
         apiFetch<any>('/api/admin/overview'),
         apiFetch<any>('/api/payments/reports/monthly'),
         apiFetch<any>('/api/payments/integration-guide'),
         apiFetch<any>('/api/operations/empowerment'),
         apiFetch<any>('/api/operations/projects'),
         apiFetch<any>('/api/communications/centre'),
+        apiFetch<any>('/api/communications/talksasa/logs').catch(() => null),
       ]);
       setAdminData(ov);
       setMonthlyReport(rep);
@@ -162,6 +171,7 @@ export const AdminVerificationPortal: React.FC = () => {
       setEmpowerment(emp);
       setProjectsData(proj);
       setCommCentre(comm);
+      setTalksasaData(ts);
 
       if (ov.verificationCases?.[0] && !selectedCaseId) {
         setSelectedCaseId(ov.verificationCases[0].id);
@@ -1247,18 +1257,18 @@ export const AdminVerificationPortal: React.FC = () => {
               <div className="flex items-center gap-2">
                 <MapPin className="w-5 h-5 text-[#287A59]" />
                 <h3 className="text-lg font-bold text-[#102E36]">
-                  Mobile Field Capture (AES-GCM Encrypted Offline Vault)
+                  Field Operations Capture (Cloud SQL Encrypted Database Vault)
                 </h3>
               </div>
               <span className="text-xs font-semibold text-[#287A59] flex items-center gap-1">
                 {isOnline ? <CheckCircle2 className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5 text-[#B6721A]" />}
-                {isOnline ? 'Online Ready' : 'Offline Mode'}
+                {isOnline ? 'PostgreSQL Live' : 'Offline Mode'}
               </span>
             </div>
             <p className="text-xs text-[#4A636A]">
               Designed for National, County, Sub-County Coordinators, Ward Ambassadors, and Volunteers.
-              Records captured offline are encrypted locally with WebCrypto AES-256-GCM and wiped
-              securely once synchronised to PostgreSQL.
+              Records are encrypted with server-side AES-256-GCM and stored strictly in PostgreSQL so drafts
+              remain accessible across all browsers and devices.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <select
@@ -1289,26 +1299,34 @@ export const AdminVerificationPortal: React.FC = () => {
               variant="teal"
               onClick={async () => {
                 if (!fieldSummary.trim()) return;
-                await saveEncryptedOfflineRecord({
-                  localId: `fld-${Date.now()}`,
-                  recordType: fieldRecordType,
-                  county: fieldCounty,
-                  capturedAt: new Date().toISOString(),
-                  payload: { summary: fieldSummary, caseId: selectedCaseId || null },
-                });
-                setFieldSummary('');
-                await loadOffline();
-                setFeedback('Field record encrypted in local WebCrypto vault.');
+                setErrorMsg(null);
+                try {
+                  await saveEncryptedOfflineRecord(
+                    {
+                      localId: `fld-${Date.now()}`,
+                      recordType: fieldRecordType,
+                      county: fieldCounty,
+                      capturedAt: new Date().toISOString(),
+                      payload: { summary: fieldSummary, caseId: selectedCaseId || null },
+                    },
+                    token
+                  );
+                  setFieldSummary('');
+                  await loadOffline();
+                  setFeedback('Field record encrypted and saved permanently to Cloud SQL PostgreSQL.');
+                } catch (err: any) {
+                  setErrorMsg(err.message);
+                }
               }}
             >
-              Save to Encrypted Local Vault
+              Save to Encrypted Database Vault
             </GlossyButton>
           </div>
 
           <div className="lg:col-span-6 hc-card p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-[#102E36]">
-                Pending Encrypted Offline Queue ({offlineRecords.length})
+                Pending Encrypted Field Queue ({offlineRecords.length})
               </h3>
               <GlossyButton
                 size="sm"
@@ -1328,23 +1346,23 @@ export const AdminVerificationPortal: React.FC = () => {
                           fieldVisitNotes: String(rec.payload.summary || ''),
                         }),
                       });
-                      securelyWipeOfflineRecord(rec.localId);
+                      await markOfflineRecordSynced(rec.localId, token);
                     }
                     await loadOffline();
                     await loadAll();
-                    setFeedback('All encrypted field records synced & wiped cleanly from local device storage.');
+                    setFeedback('All encrypted field records synced into case verification logs in PostgreSQL.');
                   } catch (err: any) {
                     setErrorMsg(err.message);
                   }
                 }}
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                Sync & Securely Wipe Local
+                Sync to Verification Case
               </GlossyButton>
             </div>
             {offlineRecords.length === 0 ? (
               <div className="text-xs text-[#4A636A] py-6 text-center">
-                No encrypted offline drafts stored on this device.
+                No pending encrypted field drafts in PostgreSQL.
               </div>
             ) : (
               <div className="space-y-2.5">
@@ -1358,12 +1376,16 @@ export const AdminVerificationPortal: React.FC = () => {
                     </div>
                     <button
                       type="button"
-                      onClick={() => {
-                        securelyWipeOfflineRecord(rec.localId);
-                        loadOffline();
+                      onClick={async () => {
+                        try {
+                          await securelyWipeOfflineRecord(rec.localId, token);
+                          await loadOffline();
+                        } catch (err: any) {
+                          setErrorMsg(err.message);
+                        }
                       }}
                       className="text-[#9F2D20] p-1"
-                      aria-label="Wipe local draft"
+                      aria-label="Delete database draft"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1758,6 +1780,191 @@ export const AdminVerificationPortal: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* TalkSasa SMS Gateway & Cloud SQL Delivery Tracker */}
+          {talksasaData && (
+            <div className="hc-card p-6 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-5 h-5 text-[#287A59]" />
+                    <h3 className="text-base font-bold text-[#102E36]">
+                      TalkSasa SMS Gateway &amp; Cloud SQL Delivery Ledger
+                    </h3>
+                  </div>
+                  <p className="text-xs text-[#4A636A] mt-0.5">
+                    Kenyan MSISDN normalisation (2547 / 2541), idempotent OTP persistence, redacted message audit logs, and carrier DLR webhook tracking stored in PostgreSQL across all browsers.
+                  </p>
+                </div>
+                <div className="text-xs font-mono-num">
+                  <span className="font-semibold text-[#102E36]">
+                    Sender ID: {talksasaData.gateway?.senderId || 'HUMANITY'}
+                  </span>{' '}
+                  ·{' '}
+                  <span
+                    className={`font-bold ${
+                      talksasaData.gateway?.configured ? 'text-[#287A59]' : 'text-[#B6721A]'
+                    }`}
+                  >
+                    {talksasaData.gateway?.configured
+                      ? 'Live TalkSasa API Connected'
+                      : 'Sandbox Persistence Mode (Set TALKSASA_API_TOKEN)'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+                {[
+                  { label: 'Total SMS Logged', val: talksasaData.counts?.total ?? 0, tone: 'text-[#102E36]' },
+                  { label: 'Delivered (DLR)', val: talksasaData.counts?.delivered ?? 0, tone: 'text-[#287A59]' },
+                  { label: 'Sent to Carrier', val: talksasaData.counts?.sent ?? 0, tone: 'text-[#102E36]' },
+                  { label: 'Failed / Rejected', val: talksasaData.counts?.failed ?? 0, tone: 'text-[#9F2D20]' },
+                  { label: 'Sandbox Queued', val: talksasaData.counts?.sandboxQueued ?? 0, tone: 'text-[#B6721A]' },
+                ].map((k) => (
+                  <div key={k.label} className="p-3 rounded-xl bg-white border border-[#102E36]/12">
+                    <div className="text-[11px] text-[#4A636A]">{k.label}</div>
+                    <div className={`text-lg font-extrabold font-mono-num mt-0.5 ${k.tone}`}>{k.val}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                <form
+                  className="lg:col-span-5 p-4 rounded-xl bg-white border border-[#102E36]/12 space-y-3 text-xs"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    setSmsBusy(true);
+                    setErrorMsg(null);
+                    setFeedback(null);
+                    try {
+                      const res = await apiFetch<{ result: any }>('/api/communications/talksasa/send', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          recipientPhone: smsPhone,
+                          templateCode: smsTemplate,
+                          message: smsMessage,
+                        }),
+                      });
+                      setSmsMessage('');
+                      await loadAll();
+                      setFeedback(
+                        `TalkSasa SMS ${res.result.dispatchRef} recorded (${res.result.deliveryStatus}) for ${res.result.recipientMasked}.`
+                      );
+                    } catch (err: any) {
+                      setErrorMsg(err.message);
+                    } finally {
+                      setSmsBusy(false);
+                    }
+                  }}
+                >
+                  <div className="font-bold text-sm text-[#102E36]">Send Operational TalkSasa SMS</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block font-semibold mb-1">Kenyan Phone (07/01/+254)</label>
+                      <input
+                        required
+                        value={smsPhone}
+                        onChange={(e) => setSmsPhone(e.target.value)}
+                        placeholder="+254712345678"
+                        className="w-full px-3 py-2 rounded-xl bg-[#FAF9F6] border border-[#102E36]/15"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold mb-1">Template Category</label>
+                      <select
+                        value={smsTemplate}
+                        onChange={(e) => setSmsTemplate(e.target.value as any)}
+                        className="w-full px-3 py-2 rounded-xl bg-[#FAF9F6] border border-[#102E36]/15"
+                      >
+                        <option value="GENERAL">General Notice</option>
+                        <option value="VERIFICATION">Verification Update</option>
+                        <option value="PAYMENT">M-Pesa Confirmation</option>
+                        <option value="ONBOARDING">Staff Onboarding</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block font-semibold mb-1">SMS Message (PII-Screened)</label>
+                    <textarea
+                      required
+                      rows={2}
+                      value={smsMessage}
+                      onChange={(e) => setSmsMessage(e.target.value)}
+                      placeholder="Concise operational SMS update (never include confidential safeguarding or minor PII)..."
+                      className="w-full px-3 py-2 rounded-xl bg-[#FAF9F6] border border-[#102E36]/15"
+                    />
+                  </div>
+                  <GlossyButton type="submit" size="sm" variant="teal" disabled={smsBusy}>
+                    <Send className="w-3.5 h-3.5" />
+                    {smsBusy ? 'Dispatching...' : 'Dispatch & Log in PostgreSQL'}
+                  </GlossyButton>
+                </form>
+
+                <div className="lg:col-span-7 space-y-2 max-h-64 overflow-y-auto text-xs">
+                  {(talksasaData.logs || []).length === 0 ? (
+                    <div className="p-6 rounded-xl bg-white border border-[#102E36]/12 text-center text-[#4A636A]">
+                      No TalkSasa SMS dispatches logged in PostgreSQL yet.
+                    </div>
+                  ) : (
+                    (talksasaData.logs || []).map((log: any) => (
+                      <div
+                        key={log.id}
+                        className="p-3 rounded-xl bg-white border border-[#102E36]/12 flex flex-wrap items-start justify-between gap-2"
+                      >
+                        <div className="space-y-0.5 flex-1 min-w-[220px]">
+                          <div className="flex flex-wrap items-center gap-2 font-mono-num">
+                            <strong className="text-[#102E36]">{log.dispatchRef}</strong>
+                            <span>·</span>
+                            <span className="text-[#4A636A]">{log.recipientMasked}</span>
+                            <span>·</span>
+                            <span
+                              className={`font-bold ${
+                                log.deliveryStatus === 'DELIVERED' || log.deliveryStatus === 'SENT'
+                                  ? 'text-[#287A59]'
+                                  : log.deliveryStatus === 'FAILED' || log.deliveryStatus === 'REJECTED'
+                                    ? 'text-[#9F2D20]'
+                                    : 'text-[#B6721A]'
+                              }`}
+                            >
+                              {log.deliveryStatus}
+                            </span>
+                          </div>
+                          <div className="text-[#4A636A]">{log.messagePreview}</div>
+                          {log.errorReason && (
+                            <div className="text-[11px] text-[#9F2D20]">Error: {log.errorReason}</div>
+                          )}
+                        </div>
+                        {(log.deliveryStatus === 'FAILED' || log.deliveryStatus === 'SANDBOX_QUEUED') &&
+                          log.templateCode !== 'OTP' && (
+                            <GlossyButton
+                              size="sm"
+                              variant="ivory"
+                              onClick={async () => {
+                                setErrorMsg(null);
+                                try {
+                                  const res = await apiFetch<{ result: any }>(
+                                    `/api/communications/talksasa/retry/${log.id}`,
+                                    { method: 'POST' }
+                                  );
+                                  await loadAll();
+                                  setFeedback(
+                                    `Retried ${res.result.dispatchRef}: status ${res.result.deliveryStatus}.`
+                                  );
+                                } catch (err: any) {
+                                  setErrorMsg(err.message);
+                                }
+                              }}
+                            >
+                              Retry
+                            </GlossyButton>
+                          )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

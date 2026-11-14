@@ -1437,6 +1437,82 @@ export const staffOnboardingChecklists = pgTable(
   ]
 );
 
+// 52. TalkSasa SMS Gateway Logs (Persistent Outbound SMS, OTP & Delivery Tracking)
+export const talksasaSmsLogs = pgTable(
+  'talksasa_sms_logs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    dispatchRef: text('dispatch_ref').notNull().unique(),
+    idempotencyKey: text('idempotency_key').unique(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    templateCode: text('template_code').notNull().default('GENERAL'),
+    // OTP | VERIFICATION | PAYMENT | ONBOARDING | GENERAL
+    senderId: text('sender_id').notNull().default('HUMANITY'),
+    recipientMsisdn: text('recipient_msisdn').notNull(), // Normalized 254XXXXXXXXX
+    recipientMasked: text('recipient_masked').notNull(),
+    messagePreview: text('message_preview').notNull(), // Sensitive codes redacted
+    messageLength: integer('message_length').notNull().default(0),
+    smsUnits: integer('sms_units').notNull().default(1),
+    providerUid: text('provider_uid'),
+    deliveryStatus: text('delivery_status').notNull().default('QUEUED'),
+    // QUEUED | SENT | DELIVERED | FAILED | REJECTED | SANDBOX_QUEUED
+    httpStatus: integer('http_status'),
+    attemptCount: integer('attempt_count').notNull().default(1),
+    errorReason: text('error_reason'),
+    providerResponseJson: jsonb('provider_response_json').$type<Record<string, unknown>>(),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('idx_talksasa_msisdn_created').on(t.recipientMsisdn, t.createdAt),
+    index('idx_talksasa_status_template').on(t.deliveryStatus, t.templateCode),
+    index('idx_talksasa_provider_uid').on(t.providerUid),
+  ]
+);
+
+// 53. TalkSasa Delivery Receipt (DLR) & Callback Events
+export const talksasaWebhookEvents = pgTable(
+  'talksasa_webhook_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    smsLogId: uuid('sms_log_id').references(() => talksasaSmsLogs.id, { onDelete: 'set null' }),
+    providerUid: text('provider_uid'),
+    eventType: text('event_type').notNull().default('DLR'), // DLR | BOUNCE | OPTOUT | UNKNOWN
+    deliveryStatus: text('delivery_status').notNull(),
+    signatureVerified: boolean('signature_verified').notNull().default(false),
+    payloadJson: jsonb('payload_json').$type<Record<string, unknown>>().notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_talksasa_webhook_uid').on(t.providerUid, t.receivedAt)]
+);
+
+// 54. Persistent Encrypted Field Capture Drafts (Cross-browser PostgreSQL storage)
+export const fieldDraftRecords = pgTable(
+  'field_draft_records',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    capturedByUserId: uuid('captured_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    caseId: uuid('case_id').references(() => verificationCases.id, { onDelete: 'set null' }),
+    recordType: text('record_type').notNull().default('FIELD_VISIT'),
+    // FIELD_VISIT | BENEFICIARY_INTAKE | CONSENT_CAPTURE | EMERGENCY_REPORT
+    county: text('county').notNull().default('Nairobi'),
+    payloadEnc: text('payload_enc').notNull(), // Server AES-256-GCM encrypted summary + notes
+    syncStatus: text('sync_status').notNull().default('PENDING'), // PENDING | SYNCED
+    capturedAt: timestamp('captured_at', { withTimezone: true }).defaultNow().notNull(),
+    syncedAt: timestamp('synced_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('idx_field_drafts_user_status').on(t.capturedByUserId, t.syncStatus),
+    index('idx_field_drafts_case').on(t.caseId),
+  ]
+);
+
 // Drizzle Relations
 export const usersRelations = relations(users, ({ many, one }) => ({
   userRoles: many(userRoles),

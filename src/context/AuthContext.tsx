@@ -39,7 +39,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         headers.set('X-Active-Role', user.activeRole);
       }
 
-      const res = await fetch(url, { ...options, headers });
+      const res = await fetch(url, { ...options, headers, credentials: 'include' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.error || `Request failed (${res.status})`);
@@ -67,6 +67,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch (err: any) {
           console.error('Firebase session sync failed:', err);
           setError(err.message || 'Could not sync account session.');
+        }
+      } else {
+        // Hydrate server-backed PostgreSQL session cookie if present
+        try {
+          const res = await fetch('/api/auth/me', { credentials: 'include' });
+          if (res.ok) {
+            const data = (await res.json()) as { user?: AuthUserSummary };
+            if (data.user) {
+              setUser(data.user);
+            }
+          }
+        } catch {
+          // No active session cookie
         }
       }
       setLoading(false);
@@ -113,7 +126,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const switchRole = async (role: RoleCode) => {
-    if (!token) return;
     const data = await apiFetchWithToken<{ user: AuthUserSummary }>('/api/auth/switch-role', token, {
       method: 'POST',
       body: JSON.stringify({ role }),
@@ -122,12 +134,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshUser = async () => {
-    if (!token) return;
     const data = await apiFetchWithToken<{ user: AuthUserSummary }>('/api/auth/me', token);
     setUser(data.user);
   };
 
   const logout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+    } catch {
+      // Best-effort server logout
+    }
     try {
       await signOut(auth);
     } catch {

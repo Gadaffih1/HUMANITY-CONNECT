@@ -2,10 +2,44 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { eq, desc } from 'drizzle-orm';
 import { db } from '../db/index.ts';
-import { notifications, beneficiaryProfiles, users } from '../db/schema.ts';
-import { requireAuth, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import {
+  notifications,
+  beneficiaryProfiles,
+  users,
+  talksasaSmsLogs,
+  talksasaWebhookEvents,
+} from '../db/schema.ts';
+import { requireAuth, requireRole, AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import {
+  dispatchTalksasaSms,
+  getTalkSasaGatewayPublicStatus,
+  processTalksasaDlrWebhook,
+  retryTalksasaSms,
+} from '../lib/talksasa.ts';
+import { screenGeneralCommunicationForConfidentiality } from '../lib/rbacPolicy.ts';
 
 export const communicationsRouter = Router();
+
+// Unauthenticated TalkSasa Delivery Receipt (DLR) Webhook Endpoint
+communicationsRouter.post('/talksasa/dlr', async (req, res) => {
+  try {
+    const providedSecret =
+      (typeof req.headers['x-talksasa-secret'] === 'string' && req.headers['x-talksasa-secret']) ||
+      (typeof req.query.secret === 'string' && req.query.secret) ||
+      null;
+    const payload =
+      req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+    const result = await processTalksasaDlrWebhook({ payload, providedSecret });
+    if (!result.accepted) {
+      return res.status(401).json({ error: result.error });
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('TalkSasa DLR webhook error:', err);
+    res.status(500).json({ error: 'Unable to process TalkSasa DLR webhook.' });
+  }
+});
+
 communicationsRouter.use(requireAuth);
 
 export const NOTIFICATION_TEMPLATES = [
@@ -103,3 +137,142 @@ communicationsRouter.post('/message', async (req: AuthRequest, res) => {
 
   res.status(201).json({ message: msg });
 });
+
+// TalkSasa SMS Gateway Logs, Status Summary & Retry (Strict Cloud SQL Persistence)
+communicationsRouter.get(
+  '/talksasa/logs',
+  requireRole(
+    'SUPER_ADMIN',
+    'HR_OFFICER',
+    'VERIFICATION_OFFICER',
+    'FINANCE_OFFICER',
+    'COUNTY_REPRESENTATIVE',
+    'SAFEGUARDING_OFFICER',
+    'DATA_MANAGEMENT_OFFICER',
+    'AUDITOR'
+  ),
+  async (_req: AuthRequest, res) => {
+    try {
+      const [logs, webhooks] = await Promise.all([
+        db.select().from(talksasaSmsLogs).orderBy(desc(talksasaSmsLogs.createdAt)).limit(100),
+        db
+          .select()
+          .from(talksasaWebhookEvents)
+          .orderBy(desc(talksasaWebhookEvents.receivedAt))
+          .limit(50),
+      ]);
+
+      const counts = {
+        total: logs.length,
+        delivered: logs.filter((l) => l.deliveryStatus === 'DELIVERED').length,
+        sent: logs.filter((l) => l.deliveryStatus === 'SENT').length,
+        failed: logs.filter((l) => l.deliveryStatus === 'FAILED' || l.deliveryStatus === 'REJECTED').length,
+        sandboxQueued: logs.filter((l) => l.deliveryStatus === 'SANDBOX_QUEUED' || l.deliveryStatus === 'QUEUED').length,
+      };
+
+      res.json({
+        gateway: getTalkSasaGatewayPublicStatus(),
+        counts,
+        logs: logs.map((l) => ({
+          id: l.id,
+          dispatchRef: l.dispatchRef,
+          templateCode: l.templateCode,
+          senderId: l.senderId,
+          recipientMasked: l.recipientMasked,
+          messagePreview: l.messagePreview,
+          smsUnits: l.smsUnits,
+          providerUid: l.providerUid,
+          deliveryStatus: l.deliveryStatus,
+          httpStatus: l.httpStatus,
+          attemptCount: l.attemptCount,
+          errorReason: l.errorReason,
+          sentAt: l.sentAt,
+          deliveredAt: l.deliveredAt,
+          createdAt: l.createdAt,
+        })),
+        webhooks,
+      });
+    } catch (err) {
+      console.error('TalkSasa logs error:', err);
+      res.status(500).json({ error: 'Unable to load TalkSasa SMS logs.' });
+    }
+  }
+);
+
+communicationsRouter.post(
+  '/talksasa/send',
+  requireRole(
+    'SUPER_ADMIN',
+    'HR_OFFICER',
+    'VERIFICATION_OFFICER',
+    'FINANCE_OFFICER',
+    'COUNTY_REPRESENTATIVE'
+  ),
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      recipientPhone: z.string().min(9).max(20),
+      message: z.string().min(5).max(480),
+      templateCode: z
+        .enum(['VERIFICATION', 'PAYMENT', 'ONBOARDING', 'GENERAL'])
+        .default('GENERAL'),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Valid Kenyan phone number and SMS message required.' });
+    }
+
+    const screen = screenGeneralCommunicationForConfidentiality(parsed.data.message);
+    if (!screen.allowed) {
+      return res.status(400).json({ error: screen.reason || 'Confidential PII blocked from SMS.' });
+    }
+
+    try {
+      const result = await dispatchTalksasaSms({
+        recipientPhone: parsed.data.recipientPhone,
+        message: parsed.data.message,
+        templateCode: parsed.data.templateCode,
+        userId: req.authUser!.userId,
+      });
+
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: 'TALKSASA_SMS_DISPATCHED',
+        entityType: 'talksasa_sms_logs',
+        entityId: result.logId,
+        ip: req.ip,
+        details: {
+          dispatchRef: result.dispatchRef,
+          templateCode: parsed.data.templateCode,
+          deliveryStatus: result.deliveryStatus,
+        },
+      });
+
+      res.status(201).json({ result });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Unable to dispatch TalkSasa SMS.' });
+    }
+  }
+);
+
+communicationsRouter.post(
+  '/talksasa/retry/:id',
+  requireRole('SUPER_ADMIN', 'HR_OFFICER', 'VERIFICATION_OFFICER', 'FINANCE_OFFICER'),
+  async (req: AuthRequest, res) => {
+    try {
+      const result = await retryTalksasaSms(req.params.id);
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: 'TALKSASA_SMS_RETRIED',
+        entityType: 'talksasa_sms_logs',
+        entityId: result.logId,
+        ip: req.ip,
+        details: { dispatchRef: result.dispatchRef, deliveryStatus: result.deliveryStatus },
+      });
+      res.json({ result });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Unable to retry SMS dispatch.' });
+    }
+  }
+);
