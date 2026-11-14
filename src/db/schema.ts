@@ -523,7 +523,7 @@ export const paymentTransactions = pgTable(
     phoneE164: text('phone_e164'),
     amountMinor: integer('amount_minor').notNull(),
     currency: text('currency').notNull().default('KES'),
-    verificationStatus: text('verification_status').notNull().default('INITIATED'), // INITIATED | CALLBACK_PENDING | VERIFIED | FAILED
+    verificationStatus: text('verification_status').notNull().default('INITIATED'), // INITIATED | INITIATION_UNKNOWN | CALLBACK_PENDING | VERIFIED | FAILED
     rawCallbackHash: text('raw_callback_hash'),
     failureReason: text('failure_reason'),
     verifiedAt: timestamp('verified_at', { withTimezone: true }),

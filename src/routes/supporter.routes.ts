@@ -20,8 +20,8 @@ import {
   disbursements,
 } from '../db/schema.ts';
 import { requireAuth, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
-import { sha256Hex } from '../lib/crypto.ts';
 import { buildImpactTimeline } from '../lib/impactTimeline.ts';
+import { initiateMpesaStk, MpesaError, MpesaOutcomeUnknown } from '../lib/mpesa.ts';
 
 export const supporterRouter = Router();
 supporterRouter.use(requireAuth);
@@ -308,6 +308,12 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
       return res.status(400).json({ error: 'Invalid contribution request.' });
     }
     const d = parsed.data;
+    if (d.mode === 'MPESA_STK' && d.currency !== 'KES') {
+      return res.status(400).json({ error: 'M-Pesa contributions must be in KES.' });
+    }
+    if (d.isRecurring && !d.supporterConsentGranted) {
+      return res.status(400).json({ error: 'Explicit supporter consent is required for recurring sponsorship agreements.' });
+    }
 
     if (d.pathway === 'DIRECT_SPONSORSHIP' && !d.beneficiaryId) {
       return res.status(400).json({ error: 'Verified beneficiary selection is required for direct sponsorship.' });
@@ -347,6 +353,10 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
 
     const result = await db.transaction(async (tx) => {
       const isPledge = d.mode === 'PLEDGE_ONLY';
+      let stk: Awaited<ReturnType<typeof initiateMpesaStk>> | null = null;
+      if (d.mode === 'MPESA_STK') {
+        await tx.execute(sql`select pg_advisory_xact_lock(174501, 2)`);
+      }
 
       const [donation] = await tx
         .insert(donations)
@@ -436,7 +446,7 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
 
       let paymentTx = null;
       if (!isPledge) {
-        const checkoutRequestId = `ws_CO_${crypto.randomBytes(8).toString('hex')}`;
+        const checkoutRequestId = `hc_PENDING_${crypto.randomUUID()}`;
         const idempotencyKey = `hc-pay-${crypto.randomUUID()}`;
         const [ptx] = await tx
           .insert(paymentTransactions)
@@ -454,13 +464,31 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
         paymentTx = ptx;
       }
 
-      return { donation, sponsorshipRecord, paymentTx };
+      if (d.mode === 'MPESA_STK' && paymentTx) {
+        try {
+          stk = await initiateMpesaStk(d.phoneE164 || req.authUser!.phoneE164 || '', d.amountMinor);
+        } catch (err) {
+          if (!(err instanceof MpesaOutcomeUnknown)) throw err;
+          [paymentTx] = await tx.update(paymentTransactions).set({
+            verificationStatus: 'INITIATION_UNKNOWN',
+            failureReason: 'Provider response unavailable; reconcile before retrying.',
+          }).where(eq(paymentTransactions.id, paymentTx.id)).returning();
+          return { donation, sponsorshipRecord, paymentTx, gatewayMode: undefined, initiationUnknown: true };
+        }
+        [paymentTx] = await tx.update(paymentTransactions).set({
+          checkoutRequestId: stk.checkoutRequestId,
+          phoneE164: `+${stk.phone}`,
+        }).where(eq(paymentTransactions.id, paymentTx.id)).returning();
+      }
+
+      return { donation, sponsorshipRecord, paymentTx, gatewayMode: stk?.mode, initiationUnknown: false };
     });
 
     await writeAuditLog({
       actorUserId: req.authUser!.userId,
       actorRole: req.authUser!.activeRole,
-      action: d.mode === 'PLEDGE_ONLY' ? 'PLEDGE_RECORDED' : 'PAYMENT_INITIATED',
+      action: result.initiationUnknown ? 'MPESA_INITIATION_UNKNOWN'
+        : d.mode === 'PLEDGE_ONLY' ? 'PLEDGE_RECORDED' : 'PAYMENT_INITIATED',
       entityType: 'donations',
       entityId: result.donation.id,
       ip: req.ip,
@@ -472,137 +500,15 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
       },
     });
 
+    if (result.initiationUnknown) {
+      return res.status(502).json({ error: 'Payment request status is unknown. Check your phone and contact support before retrying.' });
+    }
     res.status(201).json(result);
   } catch (err) {
     console.error('Checkout error:', err);
-    res.status(500).json({ error: 'Unable to initiate contribution.' });
-  }
-});
-
-// Server-side M-Pesa Daraja / Payment Verification Callback (atomic ledger settlement)
-supporterRouter.post('/mpesa/verify-callback', async (req: AuthRequest, res) => {
-  try {
-    const schema = z.object({
-      checkoutRequestId: z.string().min(4),
-      resultCode: z.number().int(),
-      mpesaReceiptNumber: z.string().min(4).optional(),
+    res.status(err instanceof MpesaError ? err.status : 500).json({
+      error: err instanceof MpesaError ? err.message : 'Unable to confirm whether the contribution request was received. Check your phone and contact support before retrying.',
     });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: 'Invalid callback payload.' });
-
-    const { checkoutRequestId, resultCode, mpesaReceiptNumber } = parsed.data;
-
-    const settled = await db.transaction(async (tx) => {
-      const [ptx] = await tx
-        .select()
-        .from(paymentTransactions)
-        .where(eq(paymentTransactions.checkoutRequestId, checkoutRequestId))
-        .limit(1);
-
-      if (!ptx) throw new Error('Transaction not found.');
-      if (ptx.verificationStatus === 'VERIFIED') return { alreadySettled: true, ptx };
-
-      const [donation] = await tx
-        .select()
-        .from(donations)
-        .where(eq(donations.id, ptx.donationId))
-        .limit(1);
-      if (!donation) throw new Error('Parent donation not found.');
-
-      if (resultCode !== 0) {
-        const [failedTx] = await tx
-          .update(paymentTransactions)
-          .set({
-            verificationStatus: 'FAILED',
-            failureReason: `Gateway returned non-zero status code (${resultCode})`,
-            rawCallbackHash: sha256Hex(JSON.stringify(req.body)),
-          })
-          .where(eq(paymentTransactions.id, ptx.id))
-          .returning();
-
-        await tx
-          .update(donations)
-          .set({ status: 'FAILED' })
-          .where(eq(donations.id, donation.id));
-
-        return { failed: true, ptx: failedTx };
-      }
-
-      const verifiedReceipt =
-        mpesaReceiptNumber || `QKH${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-
-      const [verifiedTx] = await tx
-        .update(paymentTransactions)
-        .set({
-          verificationStatus: 'VERIFIED',
-          mpesaReceiptNumber: verifiedReceipt,
-          rawCallbackHash: sha256Hex(JSON.stringify(req.body)),
-          verifiedAt: new Date(),
-        })
-        .where(eq(paymentTransactions.id, ptx.id))
-        .returning();
-
-      await tx
-        .update(donations)
-        .set({ status: 'CONFIRMED', confirmedAt: new Date() })
-        .where(eq(donations.id, donation.id));
-
-      if (donation.pathway === 'DIRECT_SPONSORSHIP') {
-        if (donation.needRequestId) {
-          await tx
-            .update(needRequests)
-            .set({
-              fulfilledAmountMinor: sql`${needRequests.fulfilledAmountMinor} + ${donation.amountMinor}`,
-              status: 'FUNDING',
-            })
-            .where(eq(needRequests.id, donation.needRequestId));
-        }
-        if (donation.beneficiaryId) {
-          await tx
-            .update(sponsorships)
-            .set({ status: 'ACTIVE', startedAt: new Date() })
-            .where(
-              and(
-                eq(sponsorships.supporterId, donation.supporterId),
-                eq(sponsorships.beneficiaryId, donation.beneficiaryId),
-                eq(sponsorships.status, 'PENDING_FIRST_PAYMENT')
-              )
-            );
-        }
-      } else if (donation.pathway === 'CENTRAL_FUND' && donation.fundId) {
-        await tx
-          .update(humanitarianFunds)
-          .set({
-            availableBalanceMinor: sql`${humanitarianFunds.availableBalanceMinor} + ${donation.amountMinor}`,
-            totalReceivedMinor: sql`${humanitarianFunds.totalReceivedMinor} + ${donation.amountMinor}`,
-          })
-          .where(eq(humanitarianFunds.id, donation.fundId));
-      }
-
-      await tx.insert(notifications).values({
-        userId: req.authUser!.userId,
-        category: 'PAYMENT',
-        title: `Verified Payment Receipt ${verifiedReceipt}`,
-        body: `Your contribution of ${donation.currency} ${(donation.amountMinor / 100).toLocaleString()} has been server-verified and settled.`,
-      });
-
-      return { settled: true, ptx: verifiedTx };
-    });
-
-    await writeAuditLog({
-      actorUserId: req.authUser!.userId,
-      actorRole: req.authUser!.activeRole,
-      action: 'PAYMENT_SERVER_VERIFIED',
-      entityType: 'payment_transactions',
-      entityId: settled.ptx.id,
-      ip: req.ip,
-      details: { checkoutRequestId, resultCode },
-    });
-
-    res.json(settled);
-  } catch (err: any) {
-    console.error('Payment callback error:', err);
-    res.status(400).json({ error: err.message || 'Unable to verify payment.' });
   }
 });
 

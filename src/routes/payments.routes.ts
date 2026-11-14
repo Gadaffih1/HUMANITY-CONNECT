@@ -23,43 +23,10 @@ import {
   writeAuditLog,
 } from '../middleware/auth.ts';
 import { sha256Hex } from '../lib/crypto.ts';
+import { initiateMpesaStk, MpesaError, MpesaOutcomeUnknown, verifyMpesaCallbackToken } from '../lib/mpesa.ts';
+import { MPESA_ACCOUNT, MPESA_PAYBILL } from '../lib/mpesaDestination.ts';
 
 export const paymentsRouter = Router();
-
-function getDarajaBaseUrl() {
-  return process.env.MPESA_ENV === 'production'
-    ? 'https://api.safaricom.co.ke'
-    : 'https://sandbox.safaricom.co.ke';
-}
-
-async function fetchDarajaOAuthToken(): Promise<{ accessToken: string; mode: 'LIVE_DARAJA' | 'SANDBOX_SIMULATED' }> {
-  const key = process.env.MPESA_CONSUMER_KEY;
-  const secret = process.env.MPESA_CONSUMER_SECRET;
-  if (!key || !secret) {
-    return { accessToken: '', mode: 'SANDBOX_SIMULATED' };
-  }
-  const auth = Buffer.from(`${key}:${secret}`).toString('base64');
-  const resp = await fetch(
-    `${getDarajaBaseUrl()}/oauth/v1/generate?grant_type=client_credentials`,
-    {
-      headers: { Authorization: `Basic ${auth}` },
-    }
-  );
-  if (!resp.ok) {
-    throw new Error(`Daraja OAuth authentication failed (${resp.status})`);
-  }
-  const data = (await resp.json()) as { access_token?: string };
-  if (!data.access_token) throw new Error('Daraja OAuth token missing in response');
-  return { accessToken: data.access_token, mode: 'LIVE_DARAJA' };
-}
-
-function normalizeKenyaPhone(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
-  if (digits.startsWith('254') && digits.length === 12) return digits;
-  if (digits.startsWith('0') && digits.length === 10) return `254${digits.slice(1)}`;
-  if (digits.startsWith('7') && digits.length === 9) return `254${digits}`;
-  return digits;
-}
 
 // POST /api/payments/mpesa/stk-push — Backend-only Daraja STK Push initiation
 paymentsRouter.post('/mpesa/stk-push', requireAuth, async (req: AuthRequest, res) => {
@@ -80,21 +47,11 @@ paymentsRouter.post('/mpesa/stk-push', requireAuth, async (req: AuthRequest, res
       return res.status(400).json({ error: 'Valid phone number, positive amount, and pathway required.' });
     }
     const d = parsed.data;
-    const msisdn = normalizeKenyaPhone(d.phone);
-    if (!/^254[17]\d{8}$/.test(msisdn)) {
-      return res.status(400).json({ error: 'Enter a valid Kenyan M-Pesa number (e.g. 0712345678 or +254712345678).' });
+    if ((d.pathway === 'DIRECT_SPONSORSHIP' && !d.beneficiaryId) ||
+        (d.pathway === 'CENTRAL_FUND' && !d.fundId)) {
+      return res.status(400).json({ error: 'Select a beneficiary or fund for the chosen contribution pathway.' });
     }
-
     const idemKey = d.idempotencyKey || `stk-${req.authUser!.userId}-${crypto.randomUUID()}`;
-    const [existingTx] = await db
-      .select()
-      .from(paymentTransactions)
-      .where(eq(paymentTransactions.idempotencyKey, idemKey))
-      .limit(1);
-    if (existingTx) {
-      return res.json({ deduplicated: true, transaction: existingTx });
-    }
-
     const [supporter] = await db
       .select()
       .from(supporterProfiles)
@@ -104,47 +61,11 @@ paymentsRouter.post('/mpesa/stk-push', requireAuth, async (req: AuthRequest, res
       return res.status(400).json({ error: 'Supporter profile required before payment initiation.' });
     }
 
-    const oauth = await fetchDarajaOAuthToken();
-    const amountKes = Math.max(1, Math.round(d.amountMinor / 100));
-    let checkoutRequestId = `ws_CO_${crypto.randomBytes(8).toString('hex')}`;
-
-    if (oauth.mode === 'LIVE_DARAJA' && process.env.MPESA_SHORTCODE && process.env.MPESA_PASSKEY) {
-      const timestamp = new Date()
-        .toISOString()
-        .replace(/[-:T.Z]/g, '')
-        .slice(0, 14);
-      const password = Buffer.from(
-        `${process.env.MPESA_SHORTCODE}${process.env.MPESA_PASSKEY}${timestamp}`
-      ).toString('base64');
-
-      const stkRes = await fetch(`${getDarajaBaseUrl()}/mpesa/stkpush/v1/processrequest`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${oauth.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          BusinessShortCode: process.env.MPESA_SHORTCODE,
-          Password: password,
-          Timestamp: timestamp,
-          TransactionType: 'CustomerPayBillOnline',
-          Amount: amountKes,
-          PartyA: msisdn,
-          PartyB: process.env.MPESA_SHORTCODE,
-          PhoneNumber: msisdn,
-          CallBackURL: process.env.MPESA_CALLBACK_URL || `${process.env.APP_URL}/api/payments/mpesa/callback`,
-          AccountReference: d.pathway === 'DIRECT_SPONSORSHIP' ? 'HC-SPONSOR' : 'HC-FUND',
-          TransactionDesc: 'Humanity Connect Contribution',
-        }),
-      });
-      const stkJson = (await stkRes.json()) as { CheckoutRequestID?: string; errorMessage?: string };
-      if (!stkRes.ok || !stkJson.CheckoutRequestID) {
-        return res.status(502).json({ error: stkJson.errorMessage || 'Daraja STK Push request failed.' });
-      }
-      checkoutRequestId = stkJson.CheckoutRequestID;
-    }
-
     const created = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(174501, 2)`);
+      const [existingTx] = await tx.select({ id: paymentTransactions.id }).from(paymentTransactions)
+        .where(eq(paymentTransactions.idempotencyKey, idemKey)).limit(1);
+      if (existingTx) throw new MpesaError('A payment request with this idempotency key already exists.', 409);
       const [donation] = await tx
         .insert(donations)
         .values({
@@ -162,41 +83,59 @@ paymentsRouter.post('/mpesa/stk-push', requireAuth, async (req: AuthRequest, res
         })
         .returning();
 
-      const [ptx] = await tx
+      let [ptx] = await tx
         .insert(paymentTransactions)
         .values({
           donationId: donation.id,
           provider: 'MPESA_DARAJA',
           idempotencyKey: idemKey,
-          checkoutRequestId,
-          phoneE164: `+${msisdn}`,
+          checkoutRequestId: `hc_PENDING_${crypto.randomUUID()}`,
+          phoneE164: d.phone,
           amountMinor: d.amountMinor,
           currency: 'KES',
           verificationStatus: 'CALLBACK_PENDING',
         })
         .returning();
 
-      return { donation, transaction: ptx };
+      let stk: Awaited<ReturnType<typeof initiateMpesaStk>>;
+      try {
+        stk = await initiateMpesaStk(d.phone, d.amountMinor);
+      } catch (err) {
+        if (!(err instanceof MpesaOutcomeUnknown)) throw err;
+        [ptx] = await tx.update(paymentTransactions).set({
+          verificationStatus: 'INITIATION_UNKNOWN',
+          failureReason: 'Provider response unavailable; reconcile before retrying.',
+        }).where(eq(paymentTransactions.id, ptx.id)).returning();
+        return { donation, transaction: ptx, gatewayMode: undefined, initiationUnknown: true };
+      }
+      [ptx] = await tx.update(paymentTransactions).set({
+        checkoutRequestId: stk.checkoutRequestId,
+        phoneE164: `+${stk.phone}`,
+      }).where(eq(paymentTransactions.id, ptx.id)).returning();
+      return { donation, transaction: ptx, gatewayMode: stk.mode, initiationUnknown: false };
     });
 
     await writeAuditLog({
       actorUserId: req.authUser!.userId,
       actorRole: req.authUser!.activeRole,
-      action: 'MPESA_STK_INITIATED',
+      action: created.initiationUnknown ? 'MPESA_INITIATION_UNKNOWN' : 'MPESA_STK_INITIATED',
       entityType: 'payment_transactions',
       entityId: created.transaction.id,
       ip: req.ip,
-      details: { mode: oauth.mode, checkoutRequestId },
+      details: { mode: created.gatewayMode, checkoutRequestId: created.transaction.checkoutRequestId },
     });
 
+    if (created.initiationUnknown) {
+      return res.status(502).json({ error: 'Payment request status is unknown. Check your phone and contact support before retrying.' });
+    }
     res.status(201).json({
       ...created,
-      gatewayMode: oauth.mode,
-      message: 'STK Push initiated. Awaiting verified Safaricom Daraja callback.',
+      destination: { paybill: MPESA_PAYBILL, account: MPESA_ACCOUNT },
+      message: 'STK Push initiated. Awaiting Safaricom Daraja callback.',
     });
   } catch (err: any) {
     console.error('STK Push error:', err);
-    res.status(500).json({ error: err.message || 'Unable to initiate M-Pesa STK Push.' });
+    res.status(err instanceof MpesaError ? err.status : 500).json({ error: err instanceof MpesaError ? err.message : 'Unable to confirm whether M-Pesa received the request. Do not retry until you check your phone and contact support.' });
   }
 });
 
@@ -209,6 +148,7 @@ async function settleDarajaCallback(payload: {
   rawBody: unknown;
 }) {
   return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(174501, 2)`);
     const [ptx] = await tx
       .select()
       .from(paymentTransactions)
@@ -242,15 +182,11 @@ async function settleDarajaCallback(payload: {
     }
 
     // Validate settled amount matches expected transaction amount
-    if (payload.amountKes !== undefined) {
-      const expectedKes = Math.round(ptx.amountMinor / 100);
-      if (Math.abs(payload.amountKes - expectedKes) > 1) {
-        throw new Error(`Callback amount mismatch: expected KES ${expectedKes}, got KES ${payload.amountKes}.`);
-      }
+    if (payload.amountKes !== ptx.amountMinor / 100 || !payload.mpesaReceiptNumber) {
+      throw new Error('Callback receipt or amount is missing or does not match the transaction.');
     }
 
-    const receipt =
-      payload.mpesaReceiptNumber || `QK${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const receipt = payload.mpesaReceiptNumber;
 
     const [verifiedTx] = await tx
       .update(paymentTransactions)
@@ -345,21 +281,20 @@ async function settleDarajaCallback(payload: {
 // POST /api/payments/mpesa/callback — Official Safaricom Daraja Webhook
 paymentsRouter.post('/mpesa/callback', async (req, res) => {
   try {
-    const webhookSecret = process.env.MPESA_WEBHOOK_SECRET;
-    if (webhookSecret && req.headers['x-mpesa-webhook-secret'] !== webhookSecret) {
-      return res.status(403).json({ error: 'Invalid webhook verification signature.' });
+    if (!verifyMpesaCallbackToken(req.query.token)) {
+      return res.status(403).json({ error: 'Invalid webhook authentication token.' });
     }
 
     const body = req.body as any;
     const stk = body?.Body?.stkCallback;
-    const checkoutRequestId = stk?.CheckoutRequestID || body?.checkoutRequestId;
-    const resultCode = typeof stk?.ResultCode === 'number' ? stk.ResultCode : body?.resultCode;
+    const checkoutRequestId = stk?.CheckoutRequestID;
+    const resultCode = stk?.ResultCode;
 
     if (!checkoutRequestId || typeof resultCode !== 'number') {
       return res.status(400).json({ error: 'Malformed Daraja callback payload.' });
     }
 
-    let mpesaReceipt: string | undefined = body?.mpesaReceiptNumber;
+    let mpesaReceipt: string | undefined;
     let amountKes: number | undefined;
     const items: Array<{ Name: string; Value: unknown }> = stk?.CallbackMetadata?.Item || [];
     for (const item of items) {
@@ -419,7 +354,7 @@ paymentsRouter.post('/mpesa/stk-query', requireAuth, async (req: AuthRequest, re
     verificationStatus: tx.verificationStatus,
     mpesaReceiptNumber: tx.mpesaReceiptNumber,
     verifiedAt: tx.verifiedAt,
-    env: process.env.MPESA_ENV || 'sandbox',
+    env: process.env.MPESA_ENV || 'unconfigured',
   });
 });
 
@@ -544,7 +479,7 @@ paymentsRouter.get(
   }
 );
 
-// GET /api/payments/integration-guide — Safaricom Daraja Production & Sandbox Integration Guide
+// GET /api/payments/integration-guide — Safaricom Daraja Production Integration Guide
 paymentsRouter.get('/integration-guide', (_req, res) => {
   res.json({
     provider: 'Safaricom Daraja M-Pesa (Kenya)',
@@ -555,7 +490,7 @@ paymentsRouter.get('/integration-guide', (_req, res) => {
       'POST /api/payments/mpesa/stk-query',
     ],
     requiredEnvVars: [
-      'MPESA_ENV=sandbox|production',
+      'MPESA_ENV=production',
       'MPESA_CONSUMER_KEY',
       'MPESA_CONSUMER_SECRET',
       'MPESA_SHORTCODE',
@@ -568,7 +503,7 @@ paymentsRouter.get('/integration-guide', (_req, res) => {
       'Idempotency key prevents duplicate STK push transactions.',
       'Duplicate callback protection checks verificationStatus === VERIFIED inside PostgreSQL transaction.',
       'Pledges are never counted as settled balances until Daraja ResultCode === 0 is verified server-side.',
-      'Production B2C disbursements require Maker-Checker two-person approval and are blocked in sandbox mode.',
+      'Sandbox contributions are disabled to prevent test payments being counted as real funds.',
     ],
   });
 });
