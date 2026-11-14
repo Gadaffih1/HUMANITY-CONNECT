@@ -25,6 +25,7 @@ import {
   Legend,
 } from 'recharts';
 import { useAuth } from '../../context/AuthContext';
+import { MPESA_ACCOUNT, MPESA_PAYBILL } from '../../lib/mpesaDestination';
 import {
   GlossyButton,
   BeneficiaryProfileCard,
@@ -121,6 +122,7 @@ export const SupporterPortal: React.FC<{
   const [isGift, setIsGift] = useState(false);
   const [giftHonoree, setGiftHonoree] = useState('');
   const [pendingStk, setPendingStk] = useState<{ checkoutRequestId: string; amountMinor: number } | null>(null);
+  const [paymentBusy, setPaymentBusy] = useState(false);
 
   // Volunteer & Safe Message state
   const [volCounty, setVolCounty] = useState('Nairobi');
@@ -1010,6 +1012,7 @@ export const SupporterPortal: React.FC<{
       >
         {checkoutTarget && !pendingStk && (
           <div className="space-y-4">
+            {errorMsg && <p role="alert" className="text-sm text-red-700">{errorMsg}</p>}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-[#102E36] mb-1">Amount (KES)</label>
@@ -1063,6 +1066,7 @@ export const SupporterPortal: React.FC<{
 
             {payMode === 'MPESA_STK' && (
               <div>
+                <p className="text-sm mb-2">M-Pesa Paybill: <strong>{MPESA_PAYBILL}</strong> · Account: <strong>{MPESA_ACCOUNT}</strong></p>
                 <label className="block text-xs font-semibold text-[#102E36] mb-1">M-Pesa Phone Number</label>
                 <input
                   value={mpesaPhone}
@@ -1119,7 +1123,10 @@ export const SupporterPortal: React.FC<{
               variant="gold"
               size="lg"
               className="w-full"
+              disabled={paymentBusy}
               onClick={async () => {
+                if (paymentBusy) return;
+                setPaymentBusy(true);
                 setErrorMsg(null);
                 try {
                   const amountMinor = Math.round(Number(amountKes || 0) * 100);
@@ -1156,10 +1163,12 @@ export const SupporterPortal: React.FC<{
                   }
                 } catch (err: any) {
                   setErrorMsg(err.message);
+                } finally {
+                  setPaymentBusy(false);
                 }
               }}
             >
-              {payMode === 'MPESA_STK' ? 'Initiate M-Pesa STK Push' : 'Record Pledge Commitment'}
+              {paymentBusy ? 'Processing...' : payMode === 'MPESA_STK' ? 'Initiate M-Pesa STK Push' : 'Record Pledge Commitment'}
             </GlossyButton>
           </div>
         )}
@@ -1172,50 +1181,14 @@ export const SupporterPortal: React.FC<{
                 CheckoutRequestID: {pendingStk.checkoutRequestId}
               </div>
               <p className="text-xs text-[#4A636A]">
-                In production, Safaricom Daraja posts the signed callback automatically to{' '}
-                <code>POST /api/payments/mpesa/callback</code>. In sandbox mode, you can simulate the
-                provider callback verification below.
+                Check your phone for the M-Pesa prompt. Your contribution remains pending until the provider confirms it.
               </p>
             </div>
-            <div className="flex flex-wrap gap-3">
-              <GlossyButton
-                variant="green"
-                onClick={async () => {
-                  await apiFetch('/api/payments/mpesa/callback', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                      checkoutRequestId: pendingStk.checkoutRequestId,
-                      resultCode: 0,
-                      amountKes: Math.round(pendingStk.amountMinor / 100),
-                    }),
-                  });
-                  setPendingStk(null);
-                  setCheckoutTarget(null);
-                  await loadAll();
-                  setFeedback('Server-verified Daraja settlement complete and receipt issued.');
-                }}
-              >
-                Verify Sandbox Callback (ResultCode 0)
-              </GlossyButton>
-              <GlossyButton
-                variant="ivory"
-                onClick={async () => {
-                  await apiFetch('/api/payments/mpesa/callback', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                      checkoutRequestId: pendingStk.checkoutRequestId,
-                      resultCode: 1032,
-                    }),
-                  });
-                  setPendingStk(null);
-                  setCheckoutTarget(null);
-                  await loadAll();
-                  setErrorMsg('Transaction cancelled by user (ResultCode 1032) — ledger not credited.');
-                }}
-              >
-                Simulate Failed / Cancelled (1032)
-              </GlossyButton>
-            </div>
+            <GlossyButton variant="ivory" onClick={async () => {
+              setPendingStk(null);
+              setCheckoutTarget(null);
+              await loadAll();
+            }}>Close</GlossyButton>
           </div>
         )}
       </ModalDialog>

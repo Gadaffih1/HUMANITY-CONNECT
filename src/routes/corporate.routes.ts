@@ -267,6 +267,9 @@ corporateRouter.post('/bulk-sponsor', async (req: AuthRequest, res) => {
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Select 1–20 verified beneficiaries and valid amount.' });
+    if (parsed.data.mode === 'MPESA_STK') {
+      return res.status(400).json({ error: 'Batch STK payments are not supported. Record a pledge or pay each sponsorship individually.' });
+    }
 
     const [supporter] = await db
       .select()
@@ -335,17 +338,6 @@ corporateRouter.post('/bulk-sponsor', async (req: AuthRequest, res) => {
           })
           .returning();
 
-        if (parsed.data.mode === 'MPESA_STK') {
-          await tx.insert(paymentTransactions).values({
-            donationId: don.id,
-            provider: 'MPESA_DARAJA',
-            idempotencyKey: `hc-bulk-${crypto.randomUUID()}`,
-            checkoutRequestId: `ws_CO_${crypto.randomBytes(8).toString('hex')}`,
-            amountMinor: parsed.data.monthlyAmountPerBeneficiaryMinor,
-            currency: parsed.data.currency,
-            verificationStatus: 'CALLBACK_PENDING',
-          });
-        }
         results.push({ sponsorship: sp, donation: don });
 
         await tx

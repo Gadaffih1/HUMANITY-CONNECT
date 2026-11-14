@@ -206,7 +206,7 @@ publicRouter.get('/docs', (_req, res) => {
       { method: 'GET', path: '/api/beneficiary/portal', auth: 'Beneficiary Role', summary: 'Load own 17-screen beneficiary workspace data' },
       { method: 'POST', path: '/api/beneficiary/needs', auth: 'Beneficiary Role', summary: 'Create new need request with unique reference' },
       { method: 'POST', path: '/api/supporter/checkout', auth: 'Supporter / Well Wisher', summary: 'Create Pledge or Payment Intent (M-Pesa STK / Card / Bank)' },
-      { method: 'POST', path: '/api/supporter/mpesa/verify-callback', auth: 'Server / Webhook', summary: 'Atomic transactional payment settlement & receipt generation' },
+      { method: 'POST', path: '/api/payments/mpesa/callback', auth: 'Provider callback token', summary: 'Atomic payment settlement & receipt generation' },
       { method: 'POST', path: '/api/admin/verification/:caseId/action', auth: 'Officer / Admin + MFA', summary: 'V0–V4 verification decision, field visit, appeal, or suspension' },
       { method: 'POST', path: '/api/admin/needs/:needId/assess', auth: 'Officer / Admin + MFA', summary: '100-point assessment & mandatory human final approval' },
       { method: 'POST', path: '/api/ai/assist', auth: 'Authenticated', summary: 'Server-side Gemini translation, intake refinement & advisory triage' },

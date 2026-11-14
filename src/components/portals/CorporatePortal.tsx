@@ -11,6 +11,7 @@ import {
   Smartphone,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { MPESA_ACCOUNT, MPESA_PAYBILL } from '../../lib/mpesaDestination';
 import {
   GlossyButton,
   SponsorshipCard,
@@ -77,6 +78,7 @@ export const CorporatePortal: React.FC = () => {
   const [fundPayMode, setFundPayMode] = useState<'MPESA_STK' | 'PLEDGE_ONLY'>('MPESA_STK');
   const [fundPhone, setFundPhone] = useState(user?.phoneE164 || '+254712345678');
   const [pendingStk, setPendingStk] = useState<{ checkoutRequestId: string; amountMinor: number } | null>(null);
+  const [paymentBusy, setPaymentBusy] = useState(false);
 
   // AI Impact brief & Dynamic Sponsorship Matching
   const [impactBrief, setImpactBrief] = useState('');
@@ -731,7 +733,6 @@ export const CorporatePortal: React.FC = () => {
                 className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15"
               >
                 <option value="PLEDGE_ONLY">Corporate Pledge / Board Approval</option>
-                <option value="MPESA_STK">Initiate M-Pesa STK Batch</option>
               </select>
             </div>
             <GlossyButton
@@ -960,6 +961,7 @@ export const CorporatePortal: React.FC = () => {
       >
         {fundCheckout && !pendingStk && (
           <div className="space-y-4">
+            {errorMsg && <p role="alert" className="text-sm text-red-700">{errorMsg}</p>}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-[#102E36] mb-1">Amount (KES)</label>
@@ -984,17 +986,25 @@ export const CorporatePortal: React.FC = () => {
               </div>
             </div>
             {fundPayMode === 'MPESA_STK' && (
-              <input
-                value={fundPhone}
-                onChange={(e) => setFundPhone(e.target.value)}
-                placeholder="+254712345678"
-                className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15 font-mono-num"
-              />
+              <div className="space-y-2">
+                <p className="text-sm">M-Pesa Paybill: <strong>{MPESA_PAYBILL}</strong> · Account: <strong>{MPESA_ACCOUNT}</strong></p>
+                <input
+                  value={fundPhone}
+                  onChange={(e) => setFundPhone(e.target.value)}
+                  placeholder="+254712345678"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15 font-mono-num"
+                />
+              </div>
             )}
             <GlossyButton
               variant="gold"
               className="w-full"
+              disabled={paymentBusy}
               onClick={async () => {
+                if (paymentBusy) return;
+                setPaymentBusy(true);
+                setErrorMsg(null);
+                try {
                 const amountMinor = Math.round(Number(fundAmountKes || 0) * 100);
                 const res = await apiFetch<any>('/api/supporter/checkout', {
                   method: 'POST',
@@ -1014,6 +1024,11 @@ export const CorporatePortal: React.FC = () => {
                   await loadAll();
                   setFeedback('Corporate pledge recorded separately from verified settled balances.');
                 }
+                } catch (err: any) {
+                  setErrorMsg(err.message || 'Unable to initiate contribution.');
+                } finally {
+                  setPaymentBusy(false);
+                }
               }}
             >
               <Smartphone className="w-4 h-4" />
@@ -1030,27 +1045,12 @@ export const CorporatePortal: React.FC = () => {
                 CheckoutRequestID: {pendingStk.checkoutRequestId}
               </div>
             </div>
-            <GlossyButton
-              variant="green"
-              onClick={async () => {
-                await apiFetch('/api/payments/mpesa/callback', {
-                  method: 'POST',
-                  body: JSON.stringify({
-                    checkoutRequestId: pendingStk.checkoutRequestId,
-                    resultCode: 0,
-                    amountKes: Math.round(pendingStk.amountMinor / 100),
-                  }),
-                });
-                setPendingStk(null);
-                setFundCheckout(null);
-                setDirectMatchCheckout(null);
-                await loadAll();
-                setFeedback('Daraja callback verified and settlement ledger updated.');
-              }}
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              Verify Sandbox Callback (ResultCode 0)
-            </GlossyButton>
+            <p className="text-xs">Check your phone for the M-Pesa prompt. The contribution remains pending until provider confirmation.</p>
+            <GlossyButton variant="ivory" onClick={async () => {
+              setPendingStk(null);
+              setFundCheckout(null);
+              await loadAll();
+            }}>Close</GlossyButton>
           </div>
         )}
       </ModalDialog>
@@ -1067,6 +1067,7 @@ export const CorporatePortal: React.FC = () => {
       >
         {directMatchCheckout && !pendingStk && (
           <div className="space-y-4">
+            {errorMsg && <p role="alert" className="text-sm text-red-700">{errorMsg}</p>}
             <div className="p-3.5 rounded-xl bg-[#EAE6DC]/50 text-xs text-[#102E36] space-y-1">
               <div className="font-bold">Matched Need: {directMatchCheckout.match.primaryNeed?.title || 'Household Support'}</div>
               <div className="text-[#4A636A]">{directMatchCheckout.match.geminiRationale}</div>
@@ -1099,19 +1100,25 @@ export const CorporatePortal: React.FC = () => {
               </div>
             </div>
             {directMatchCheckout.mode === 'MPESA_STK' && (
-              <input
-                value={directMatchCheckout.phone}
-                onChange={(e) =>
-                  setDirectMatchCheckout({ ...directMatchCheckout, phone: e.target.value })
-                }
-                placeholder="+254712345678"
-                className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15 font-mono-num"
-              />
+              <div className="space-y-2">
+                <p className="text-sm">M-Pesa Paybill: <strong>{MPESA_PAYBILL}</strong> · Account: <strong>{MPESA_ACCOUNT}</strong></p>
+                <input
+                  value={directMatchCheckout.phone}
+                  onChange={(e) =>
+                    setDirectMatchCheckout({ ...directMatchCheckout, phone: e.target.value })
+                  }
+                  placeholder="+254712345678"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-white border border-[#102E36]/15 font-mono-num"
+                />
+              </div>
             )}
             <GlossyButton
               variant="gold"
               className="w-full"
+              disabled={paymentBusy}
               onClick={async () => {
+                if (paymentBusy) return;
+                setPaymentBusy(true);
                 setErrorMsg(null);
                 try {
                   const amountMinor = Math.round(Number(directMatchCheckout.amountKes || 0) * 100);
@@ -1139,6 +1146,8 @@ export const CorporatePortal: React.FC = () => {
                   }
                 } catch (err: any) {
                   setErrorMsg(err.message);
+                } finally {
+                  setPaymentBusy(false);
                 }
               }}
             >
@@ -1157,26 +1166,12 @@ export const CorporatePortal: React.FC = () => {
                 CheckoutRequestID: {pendingStk.checkoutRequestId}
               </div>
             </div>
-            <GlossyButton
-              variant="green"
-              onClick={async () => {
-                await apiFetch('/api/payments/mpesa/callback', {
-                  method: 'POST',
-                  body: JSON.stringify({
-                    checkoutRequestId: pendingStk.checkoutRequestId,
-                    resultCode: 0,
-                    amountKes: Math.round(pendingStk.amountMinor / 100),
-                  }),
-                });
-                setPendingStk(null);
-                setDirectMatchCheckout(null);
-                await loadAll();
-                setFeedback('Daraja callback verified and direct sponsorship activated.');
-              }}
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              Verify Sandbox Callback (ResultCode 0)
-            </GlossyButton>
+            <p className="text-xs">Check your phone for the M-Pesa prompt. The contribution remains pending until provider confirmation.</p>
+            <GlossyButton variant="ivory" onClick={async () => {
+              setPendingStk(null);
+              setDirectMatchCheckout(null);
+              await loadAll();
+            }}>Close</GlossyButton>
           </div>
         )}
       </ModalDialog>
