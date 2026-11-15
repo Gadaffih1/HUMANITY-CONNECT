@@ -122,6 +122,12 @@ export const AdminVerificationPortal: React.FC = () => {
   const [sgSeverity, setSgSeverity] = useState('HIGH');
   const [sgSummary, setSgSummary] = useState('');
 
+  // Database-Backed Data Retention & Cross-Browser Governance State
+  const [retentionYearsDraft, setRetentionYearsDraft] = useState<Record<string, string>>({});
+  const [retentionBusyId, setRetentionBusyId] = useState<string | null>(null);
+  const [sessionTtlDraft, setSessionTtlDraft] = useState('24');
+  const [settingsBusy, setSettingsBusy] = useState(false);
+
   // Empowerment Partner State
   const [partnerName, setPartnerName] = useState('');
   const [partnerType, setPartnerType] = useState<'TRAINING_INSTITUTION' | 'EMPLOYER'>('TRAINING_INSTITUTION');
@@ -222,6 +228,17 @@ export const AdminVerificationPortal: React.FC = () => {
       try {
         const dpia = await apiFetch<any>('/api/operations/safeguarding/dpia-inventory');
         setDpiaData(dpia);
+        const yearMap: Record<string, string> = {};
+        for (const rp of dpia?.retentionPolicies || []) {
+          if (rp?.id) yearMap[rp.id] = String(rp.retentionYears ?? 0);
+        }
+        setRetentionYearsDraft(yearMap);
+        const strictSetting = (dpia?.platformSettings || []).find(
+          (s: any) => s.settingKey === 'STRICT_DB_ONLY_CROSS_BROWSER_RETENTION'
+        );
+        if (strictSetting?.valueJson?.sessionTtlHours !== undefined) {
+          setSessionTtlDraft(String(strictSetting.valueJson.sessionTtlHours));
+        }
       } catch {
         // Privileged DPIA view requires verified MFA step-up
       }
@@ -1149,23 +1166,178 @@ export const AdminVerificationPortal: React.FC = () => {
           </div>
 
           {dpiaData && (
-            <div className="hc-card p-6 space-y-4">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-[#287A59]" />
-                <h3 className="text-base font-bold text-[#102E36]">
-                  DPIA Data Processing Inventory & Retention Schedule ({dpiaData.complianceFramework})
-                </h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                {(dpiaData.retentionPolicies || []).map((rp: any) => (
-                  <div key={rp.dataClass} className="p-4 rounded-xl bg-white border border-[#102E36]/10 space-y-1">
-                    <div className="font-bold text-[#102E36]">{rp.dataClass}</div>
-                    <div className="font-mono-num text-[#287A59]">Retention: {rp.retentionYears} Years</div>
-                    <div className="text-[#4A636A]">{rp.storage}</div>
-                    <div className="text-[#4A636A]">Disposal: {rp.disposal}</div>
+            <div className="space-y-6">
+              <div className="hc-card p-6 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-5 h-5 text-[#287A59]" />
+                    <h3 className="text-base font-bold text-[#102E36]">
+                      Database-Backed DPIA Retention Policies ({dpiaData.complianceFramework})
+                    </h3>
                   </div>
-                ))}
+                  <span className="text-[11px] font-semibold text-[#287A59]">
+                    Persisted in Cloud SQL · Zero Browser Cache Allowed
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                  {(dpiaData.retentionPolicies || []).map((rp: any) => {
+                    const canEditRetention = Boolean(
+                      user &&
+                        (user.roles.includes('SUPER_ADMIN') ||
+                          user.roles.includes('SAFEGUARDING_OFFICER') ||
+                          user.roles.includes('DATA_MANAGEMENT_OFFICER'))
+                    );
+                    const draftVal = retentionYearsDraft[rp.id] ?? String(rp.retentionYears ?? 0);
+                    return (
+                      <div key={rp.id || rp.dataClass} className="p-4 rounded-xl bg-white border border-[#102E36]/12 space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="font-bold text-[#102E36]">{rp.dataClass}</div>
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                              rp.statutoryLock
+                                ? 'bg-[#9F2D20]/10 text-[#9F2D20]'
+                                : 'bg-[#287A59]/10 text-[#287A59]'
+                            }`}
+                          >
+                            {rp.statutoryLock ? 'STATUTORY LOCKED' : 'CONFIGURABLE DB POLICY'}
+                          </span>
+                        </div>
+                        <div className="font-mono-num text-[#287A59] font-semibold">
+                          Current Retention: {rp.retentionYears} Years (Min: {rp.minimumRetentionYears ?? 0} yrs)
+                        </div>
+                        <div className="text-[#4A636A]">Storage: {rp.storage}</div>
+                        <div className="text-[#4A636A]">Disposal: {rp.disposal}</div>
+                        <div className="text-[11px] font-semibold text-[#102E36]">
+                          Cross-Browser Cache Restriction:{' '}
+                          <span className="text-[#287A59]">
+                            {rp.restrictCrossBrowserCache ? 'Enforced (PostgreSQL Only)' : 'Restricted'}
+                          </span>
+                        </div>
+                        {canEditRetention && rp.id && (
+                          <div className="pt-2 border-t border-[#102E36]/10 flex flex-wrap items-center gap-2">
+                            <input
+                              type="number"
+                              min={rp.minimumRetentionYears ?? 0}
+                              max={100}
+                              value={draftVal}
+                              onChange={(e) =>
+                                setRetentionYearsDraft((prev) => ({
+                                  ...prev,
+                                  [rp.id]: e.target.value,
+                                }))
+                              }
+                              className="w-24 px-2.5 py-1.5 rounded-lg bg-[#FAF9F6] border border-[#102E36]/15 font-mono-num"
+                            />
+                            <GlossyButton
+                              size="sm"
+                              variant="teal"
+                              disabled={retentionBusyId === rp.id}
+                              onClick={async () => {
+                                setErrorMsg(null);
+                                setFeedback(null);
+                                setRetentionBusyId(rp.id);
+                                try {
+                                  await apiFetch(`/api/operations/safeguarding/retention-policies/${rp.id}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({
+                                      retentionYears: Number(draftVal),
+                                      restrictCrossBrowserCache: true,
+                                    }),
+                                  });
+                                  await loadAll();
+                                  setFeedback(
+                                    `Saved "${rp.dataClass}" retention (${draftVal} yrs) to PostgreSQL across all browsers.`
+                                  );
+                                } catch (err: any) {
+                                  setErrorMsg(err.message);
+                                } finally {
+                                  setRetentionBusyId(null);
+                                }
+                              }}
+                            >
+                              {retentionBusyId === rp.id ? 'Saving...' : 'Save to DB'}
+                            </GlossyButton>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
+
+              {(dpiaData.platformSettings || []).length > 0 && (
+                <div className="hc-card p-6 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Database className="w-5 h-5 text-[#287A59]" />
+                      <h3 className="text-base font-bold text-[#102E36]">
+                        Restricted Cross-Browser Settings &amp; Sample Catalog Retention (PostgreSQL Only)
+                      </h3>
+                    </div>
+                    <span className="text-[11px] font-semibold text-[#9F2D20]">
+                      Zero localStorage / sessionStorage / IndexedDB
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
+                    {(dpiaData.platformSettings || []).map((st: any) => (
+                      <div key={st.settingKey} className="p-4 rounded-xl bg-white border border-[#102E36]/12 space-y-2">
+                        <div className="font-bold text-[#102E36]">{st.label}</div>
+                        <div className="text-[#4A636A]">{st.description}</div>
+                        <div className="p-2.5 rounded-lg bg-[#FAF9F6] border border-[#102E36]/10 font-mono-num text-[11px] text-[#102E36] space-y-1">
+                          {Object.entries(st.valueJson || {}).map(([k, v]) => (
+                            <div key={k} className="flex justify-between gap-2">
+                              <span className="text-[#4A636A]">{k}:</span>
+                              <span className="font-semibold text-[#287A59]">{String(v)}</span>
+                            </div>
+                          ))}
+                        </div>
+                        {st.settingKey === 'STRICT_DB_ONLY_CROSS_BROWSER_RETENTION' &&
+                          (user?.roles.includes('SUPER_ADMIN') || user?.roles.includes('DATA_MANAGEMENT_OFFICER')) && (
+                            <div className="pt-2 border-t border-[#102E36]/10 flex flex-wrap items-center gap-2">
+                              <label className="font-semibold text-[#102E36]">DB Session TTL (Hours):</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={168}
+                                value={sessionTtlDraft}
+                                onChange={(e) => setSessionTtlDraft(e.target.value)}
+                                className="w-20 px-2.5 py-1.5 rounded-lg bg-[#FAF9F6] border border-[#102E36]/15 font-mono-num"
+                              />
+                              <GlossyButton
+                                size="sm"
+                                variant="gold"
+                                disabled={settingsBusy}
+                                onClick={async () => {
+                                  setErrorMsg(null);
+                                  setFeedback(null);
+                                  setSettingsBusy(true);
+                                  try {
+                                    await apiFetch(`/api/operations/settings/${st.settingKey}`, {
+                                      method: 'PATCH',
+                                      body: JSON.stringify({
+                                        valueJson: {
+                                          sessionTtlHours: Number(sessionTtlDraft),
+                                        },
+                                      }),
+                                    });
+                                    await loadAll();
+                                    setFeedback('Cross-browser PostgreSQL session setting saved and active everywhere.');
+                                  } catch (err: any) {
+                                    setErrorMsg(err.message);
+                                  } finally {
+                                    setSettingsBusy(false);
+                                  }
+                                }}
+                              >
+                                {settingsBusy ? 'Updating...' : 'Update Restricted Setting'}
+                              </GlossyButton>
+                            </div>
+                          )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -1516,6 +1516,48 @@ export const fieldDraftRecords = pgTable(
   ]
 );
 
+// 55. Database-Persisted Data Retention Policies (Kenya Data Protection Act 2019 & Cross-Browser Governance)
+export const dataRetentionPolicies = pgTable(
+  'data_retention_policies',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    policyKey: text('policy_key').notNull().unique(),
+    dataClass: text('data_class').notNull(),
+    retentionYears: integer('retention_years').notNull(),
+    minimumRetentionYears: integer('minimum_retention_years').notNull().default(0),
+    storageTier: text('storage_tier').notNull(),
+    disposalMethod: text('disposal_method').notNull(),
+    restrictCrossBrowserCache: boolean('restrict_cross_browser_cache').notNull().default(true),
+    statutoryLock: boolean('statutory_lock').notNull().default(false),
+    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    check('chk_retention_years_range', sql`${t.retentionYears} >= 0 AND ${t.retentionYears} <= 100`),
+    check('chk_min_retention_years_range', sql`${t.minimumRetentionYears} >= 0 AND ${t.minimumRetentionYears} <= 100`),
+  ]
+);
+
+// 56. Restricted Cross-Browser Platform Settings (Strictly Persisted & Governed in PostgreSQL)
+export const platformSettings = pgTable(
+  'platform_settings',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    settingKey: text('setting_key').notNull().unique(),
+    category: text('category').notNull().default('DATA_RETENTION'),
+    label: text('label').notNull(),
+    description: text('description').notNull(),
+    valueJson: jsonb('value_json').$type<Record<string, unknown>>().notNull(),
+    isRestricted: boolean('is_restricted').notNull().default(true),
+    enforceNoBrowserStorage: boolean('enforce_no_browser_storage').notNull().default(true),
+    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_platform_settings_cat').on(t.category)]
+);
+
 // Drizzle Relations
 export const usersRelations = relations(users, ({ many, one }) => ({
   userRoles: many(userRoles),

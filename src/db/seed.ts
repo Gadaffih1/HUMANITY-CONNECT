@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { db, pool, withDbRetry } from './index.ts';
 import {
   roles,
@@ -19,6 +19,9 @@ import {
   empowermentMilestones,
   matchingEngineConfig,
   staffPositions,
+  staffVacancies,
+  dataRetentionPolicies,
+  platformSettings,
 } from './schema.ts';
 import { encryptSensitiveText, hashPassword, verifyPassword } from '../lib/crypto.ts';
 import { STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
@@ -311,6 +314,9 @@ async function runSeed(): Promise<void> {
         perms_count: number;
         cats_count: number;
         staff_count: number;
+        vacancies_count: number;
+        policies_count: number;
+        settings_count: number;
         has_sessions: boolean;
         has_user_perms: boolean;
         has_user_county: boolean;
@@ -320,6 +326,9 @@ async function runSeed(): Promise<void> {
           (SELECT count(*)::int FROM permissions) AS perms_count,
           (SELECT count(*)::int FROM needs_categories) AS cats_count,
           (SELECT count(*)::int FROM staff_positions) AS staff_count,
+          (SELECT count(*)::int FROM staff_vacancies) AS vacancies_count,
+          (SELECT count(*)::int FROM data_retention_policies) AS policies_count,
+          (SELECT count(*)::int FROM platform_settings) AS settings_count,
           (to_regclass('public.user_sessions') IS NOT NULL) AS has_sessions,
           (to_regclass('public.user_permissions') IS NOT NULL) AS has_user_perms,
           EXISTS (
@@ -349,6 +358,13 @@ async function runSeed(): Promise<void> {
     fastCheck.rows[0].staff_count >= STAFF_ESTABLISHMENT_170.length
   ) {
     await ensureSeededSuperAdmin();
+    if (
+      fastCheck.rows[0].vacancies_count === 0 ||
+      fastCheck.rows[0].policies_count < 4 ||
+      fastCheck.rows[0].settings_count < 2
+    ) {
+      await ensureStudioVacanciesAndGovernanceSettingsSeeded();
+    }
     return;
   }
 
@@ -1060,5 +1076,172 @@ async function runSeed(): Promise<void> {
     }
   } catch (staffSeedErr) {
     console.warn('Non-fatal staff establishment seed skipped:', staffSeedErr);
+  }
+
+  await ensureStudioVacanciesAndGovernanceSettingsSeeded();
+}
+
+async function ensureStudioVacanciesAndGovernanceSettingsSeeded(): Promise<void> {
+  // 7. Retain Studio Sample Published Vacancies from Approved Establishment (only if none exist yet)
+  try {
+    const [{ vacancyCount }] = await db
+      .select({ vacancyCount: sql<number>`count(*)::int` })
+      .from(staffVacancies);
+
+    if (vacancyCount === 0) {
+      const sampleJobIds = [
+        'HC-NLA-006',
+        'HC-VBA-017',
+        'HC-VBA-019',
+        'HC-SWS-030',
+        'HC-CFO-037',
+        'HC-SAP-055',
+      ];
+      const positions = await db
+        .select()
+        .from(staffPositions)
+        .where(inArray(staffPositions.jobId, sampleJobIds));
+
+      const deadline = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      const now = new Date();
+
+      for (let i = 0; i < positions.length; i += 1) {
+        const pos = positions[i];
+        const vacancyCode = `VAC-2026-${pos.jobId}`;
+        await db
+          .insert(staffVacancies)
+          .values({
+            vacancyCode,
+            positionId: pos.id,
+            jobId: pos.jobId,
+            jobTitle: pos.jobTitle,
+            departmentNumber: pos.departmentNumber,
+            department: pos.department,
+            jobLocation: pos.geographicalJurisdiction,
+            employmentType: pos.employmentStatus.toUpperCase().includes('CONTRACT')
+              ? 'CONTRACT'
+              : 'FULL_TIME',
+            jobDescription: pos.jobDescription,
+            academicQualifications: pos.requiredQualifications,
+            professionalRequirements: pos.professionalQualifications,
+            experienceRequirements: pos.requiredExperience,
+            applicationDeadline: deadline,
+            requiredDocuments: [
+              'Updated Curriculum Vitae (CV)',
+              'National ID / Passport Copy',
+              'Academic Degree & Practising Certificates',
+              'Valid Certificate of Good Conduct (DCI Kenya)',
+            ],
+            applicationInstructions:
+              'Submit all credentials directly through the encrypted Humanity Connect Recruitment Portal. No external email applications accepted.',
+            stage: 'PUBLISHED',
+            publishedAt: now,
+          })
+          .onConflictDoNothing({ target: staffVacancies.vacancyCode });
+
+        if (pos.vacancyStatus === 'VACANT') {
+          await db
+            .update(staffPositions)
+            .set({
+              vacancyStatus: 'RECRUITING',
+              isVacancyPublished: true,
+              vacancyPublishedAt: pos.vacancyPublishedAt || now,
+              updatedAt: now,
+            })
+            .where(eq(staffPositions.id, pos.id));
+        }
+      }
+    }
+  } catch (vacancySeedErr) {
+    console.warn('Non-fatal studio sample vacancies seed skipped:', vacancySeedErr);
+  }
+
+  // 8. Database-Persisted Data Retention Policies & Restricted Cross-Browser Settings (Never Overwrites Existing)
+  try {
+    await db
+      .insert(dataRetentionPolicies)
+      .values([
+        {
+          policyKey: 'PRIVATE_IDENTITY_GUARDIAN_DOCS',
+          dataClass: 'Private Identity & Guardian Docs',
+          retentionYears: 7,
+          minimumRetentionYears: 7,
+          storageTier: 'AES-256-GCM Private PostgreSQL Vault',
+          disposalMethod: 'Cryptographic erasure + audit certificate',
+          restrictCrossBrowserCache: true,
+          statutoryLock: false,
+        },
+        {
+          policyKey: 'FINANCIAL_LEDGER_MPESA',
+          dataClass: 'Financial Ledger & M-Pesa Receipts',
+          retentionYears: 10,
+          minimumRetentionYears: 10,
+          storageTier: 'Immutable PostgreSQL Ledger',
+          disposalMethod: 'Statutory archive lock (non-deletable)',
+          restrictCrossBrowserCache: true,
+          statutoryLock: true,
+        },
+        {
+          policyKey: 'SAFEGUARDING_INCIDENTS',
+          dataClass: 'Safeguarding Incident Records',
+          retentionYears: 25,
+          minimumRetentionYears: 25,
+          storageTier: 'Restricted Officer Partition (PostgreSQL)',
+          disposalMethod: 'Dual-admin MFA sign-off required',
+          restrictCrossBrowserCache: true,
+          statutoryLock: true,
+        },
+        {
+          policyKey: 'CROSS_BROWSER_SESSION_PREFS',
+          dataClass: 'Cross-Browser Session & Governance Settings',
+          retentionYears: 1,
+          minimumRetentionYears: 0,
+          storageTier: 'Cloud SQL PostgreSQL Only (Zero Browser Storage)',
+          disposalMethod: 'Automatic DB session expiry + no client-side retention',
+          restrictCrossBrowserCache: true,
+          statutoryLock: false,
+        },
+      ])
+      .onConflictDoNothing({ target: dataRetentionPolicies.policyKey });
+
+    await db
+      .insert(platformSettings)
+      .values([
+        {
+          settingKey: 'STRICT_DB_ONLY_CROSS_BROWSER_RETENTION',
+          category: 'DATA_RETENTION',
+          label: 'Strict Database-Only Storage & Cross-Browser Retention Restriction',
+          description:
+            'Restricts all application data, retention schedules, and governance settings to Cloud SQL PostgreSQL. Prohibits localStorage, sessionStorage, IndexedDB, and browser HTTP disk caching across all browsers.',
+          valueJson: {
+            allowBrowserLocalStorage: false,
+            allowBrowserSessionStorage: false,
+            allowIndexedDb: false,
+            enforceNoStoreHeaders: true,
+            requirePrivilegedMfaForSettingsMutation: true,
+            sessionTtlHours: 24,
+          },
+          isRestricted: true,
+          enforceNoBrowserStorage: true,
+        },
+        {
+          settingKey: 'STUDIO_SAMPLE_CATALOG_RETENTION',
+          category: 'STUDIO_CATALOG',
+          label: 'Retained Studio Sample Vacancies & Verified Projects Policy',
+          description:
+            'Retains verified community projects, V4 beneficiary showcases, and published staff establishment vacancies in PostgreSQL across all deployments and browsers.',
+          valueJson: {
+            retainVerifiedProjects: true,
+            retainPublishedVacancies: true,
+            minimumPublicSampleProjects: 3,
+            minimumPublicSampleVacancies: 6,
+          },
+          isRestricted: true,
+          enforceNoBrowserStorage: true,
+        },
+      ])
+      .onConflictDoNothing({ target: platformSettings.settingKey });
+  } catch (retentionSeedErr) {
+    console.warn('Non-fatal data retention & platform settings seed skipped:', retentionSeedErr);
   }
 }

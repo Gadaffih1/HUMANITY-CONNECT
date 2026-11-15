@@ -44,6 +44,16 @@ async function startServer() {
     });
   });
 
+  // Restrict browser-side HTTP disk/memory caching across all browsers so data & settings
+  // are strictly read from and saved to Cloud SQL PostgreSQL.
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Vary', 'Authorization, Cookie');
+    next();
+  });
+
   // Verify DB connectivity with cold-start retries, then ensure reference data is seeded without
   // blocking authentication routes on non-fatal secondary seed errors.
   app.use('/api', async (req, res, next) => {

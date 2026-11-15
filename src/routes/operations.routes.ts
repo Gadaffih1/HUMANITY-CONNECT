@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
-import { and, eq, desc } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   empowermentMilestones,
@@ -12,8 +12,14 @@ import {
   notifications,
   safeguardingIncidents,
   fieldDraftRecords,
+  dataRetentionPolicies,
+  platformSettings,
 } from '../db/schema.ts';
 import { encryptSensitiveText, decryptSensitiveText } from '../lib/crypto.ts';
+import {
+  validatePlatformSettingUpdate,
+  validateRetentionPolicyUpdate,
+} from '../lib/retentionPolicy.ts';
 import {
   requireAuth,
   requireRole,
@@ -206,24 +212,48 @@ operationsRouter.get(
   requireRole('SUPER_ADMIN', 'SAFEGUARDING_OFFICER', 'WELFARE_OFFICER', 'DATA_MANAGEMENT_OFFICER', 'AUDITOR', 'FIELD_OFFICER'),
   requirePrivilegedMfa,
   async (_req: AuthRequest, res) => {
-    const incidents = await db
-      .select({
-        id: safeguardingIncidents.id,
-        category: safeguardingIncidents.category,
-        severity: safeguardingIncidents.severity,
-        status: safeguardingIncidents.status,
-        createdAt: safeguardingIncidents.createdAt,
-      })
-      .from(safeguardingIncidents)
-      .orderBy(desc(safeguardingIncidents.createdAt));
+    const [incidents, dbPolicies, dbSettings] = await Promise.all([
+      db
+        .select({
+          id: safeguardingIncidents.id,
+          category: safeguardingIncidents.category,
+          severity: safeguardingIncidents.severity,
+          status: safeguardingIncidents.status,
+          createdAt: safeguardingIncidents.createdAt,
+        })
+        .from(safeguardingIncidents)
+        .orderBy(desc(safeguardingIncidents.createdAt)),
+      db.select().from(dataRetentionPolicies).orderBy(asc(dataRetentionPolicies.createdAt)),
+      db.select().from(platformSettings).orderBy(asc(platformSettings.settingKey)),
+    ]);
 
     res.json({
       complianceFramework: 'Kenya Data Protection Act (2019) & Child Safeguarding Standard',
-      retentionPolicies: [
-        { dataClass: 'Private Identity & Guardian Docs', retentionYears: 7, storage: 'AES-256-GCM Private Vault', disposal: 'Cryptographic erasure + audit certificate' },
-        { dataClass: 'Financial Ledger & M-Pesa Receipts', retentionYears: 10, storage: 'Immutable PostgreSQL Ledger', disposal: 'Statutory archive lock (non-deletable)' },
-        { dataClass: 'Safeguarding Incident Records', retentionYears: 25, storage: 'Restricted Officer Partition', disposal: 'Dual-admin MFA sign-off required' },
-      ],
+      retentionPolicies: dbPolicies.map((p) => ({
+        id: p.id,
+        policyKey: p.policyKey,
+        dataClass: p.dataClass,
+        retentionYears: p.retentionYears,
+        minimumRetentionYears: p.minimumRetentionYears,
+        storage: p.storageTier,
+        storageTier: p.storageTier,
+        disposal: p.disposalMethod,
+        disposalMethod: p.disposalMethod,
+        restrictCrossBrowserCache: p.restrictCrossBrowserCache,
+        statutoryLock: p.statutoryLock,
+        updatedAt: p.updatedAt,
+      })),
+      platformSettings: dbSettings.map((s) => ({
+        id: s.id,
+        settingKey: s.settingKey,
+        category: s.category,
+        label: s.label,
+        description: s.description,
+        valueJson: s.valueJson,
+        isRestricted: s.isRestricted,
+        enforceNoBrowserStorage: s.enforceNoBrowserStorage,
+        updatedAt: s.updatedAt,
+      })),
       dpiaProcessingInventory: [
         { purpose: 'Beneficiary V0-V4 Verification', lawfulBasis: 'Explicit Consent & Vital Interest', minAgeProtection: 'Guardian proxy + redacted public alias', encryption: 'AES-256-GCM' },
         { purpose: 'Direct Sponsorship & M-Pesa Settlement', lawfulBasis: 'Contractual / Donor Mandate', minAgeProtection: 'No adult-to-minor unsupervised messaging', encryption: 'TLS 1.3 + SHA-256 Webhook Integrity' },
@@ -231,6 +261,146 @@ operationsRouter.get(
       ],
       restrictedIncidentsCount: incidents.length,
     });
+  }
+);
+
+operationsRouter.patch(
+  '/safeguarding/retention-policies/:id',
+  requireRole('SUPER_ADMIN', 'SAFEGUARDING_OFFICER', 'DATA_MANAGEMENT_OFFICER'),
+  requirePrivilegedMfa,
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      retentionYears: z.number().int().min(0).max(100).optional(),
+      disposalMethod: z.string().min(6).max(240).optional(),
+      storageTier: z.string().min(4).max(160).optional(),
+      restrictCrossBrowserCache: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid retention policy payload.' });
+    }
+
+    const [existing] = await db
+      .select()
+      .from(dataRetentionPolicies)
+      .where(eq(dataRetentionPolicies.id, req.params.id))
+      .limit(1);
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Data retention policy not found.' });
+    }
+
+    const validated = validateRetentionPolicyUpdate(existing, parsed.data);
+    if (validated.ok === false) {
+      return res.status(400).json({ error: validated.error });
+    }
+
+    const [updated] = await db
+      .update(dataRetentionPolicies)
+      .set({
+        ...(validated.next.retentionYears !== undefined
+          ? { retentionYears: validated.next.retentionYears }
+          : {}),
+        ...(validated.next.disposalMethod !== undefined
+          ? { disposalMethod: validated.next.disposalMethod }
+          : {}),
+        ...(validated.next.storageTier !== undefined
+          ? { storageTier: validated.next.storageTier }
+          : {}),
+        ...(validated.next.restrictCrossBrowserCache !== undefined
+          ? { restrictCrossBrowserCache: validated.next.restrictCrossBrowserCache }
+          : {}),
+        updatedBy: req.authUser!.userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(dataRetentionPolicies.id, existing.id))
+      .returning();
+
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'DATA_RETENTION_POLICY_UPDATED',
+      entityType: 'data_retention_policies',
+      entityId: updated.id,
+      ip: req.ip,
+      details: {
+        policyKey: updated.policyKey,
+        previousYears: existing.retentionYears,
+        nextYears: updated.retentionYears,
+        restrictCrossBrowserCache: updated.restrictCrossBrowserCache,
+      },
+    });
+
+    res.json({ policy: updated });
+  }
+);
+
+operationsRouter.get(
+  '/settings',
+  requireRole('SUPER_ADMIN', 'SAFEGUARDING_OFFICER', 'DATA_MANAGEMENT_OFFICER', 'AUDITOR'),
+  requirePrivilegedMfa,
+  async (_req: AuthRequest, res) => {
+    const [settings, policies] = await Promise.all([
+      db.select().from(platformSettings).orderBy(asc(platformSettings.settingKey)),
+      db.select().from(dataRetentionPolicies).orderBy(asc(dataRetentionPolicies.createdAt)),
+    ]);
+    res.json({ settings, policies });
+  }
+);
+
+operationsRouter.patch(
+  '/settings/:settingKey',
+  requireRole('SUPER_ADMIN', 'DATA_MANAGEMENT_OFFICER'),
+  requirePrivilegedMfa,
+  async (req: AuthRequest, res) => {
+    const schema = z.object({
+      valueJson: z.record(z.string(), z.unknown()),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Valid settings JSON object required.' });
+    }
+
+    const settingKey = String(req.params.settingKey).trim().toUpperCase();
+    const [existing] = await db
+      .select()
+      .from(platformSettings)
+      .where(eq(platformSettings.settingKey, settingKey))
+      .limit(1);
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Platform setting not found.' });
+    }
+
+    const validated = validatePlatformSettingUpdate(existing, parsed.data.valueJson);
+    if (validated.ok === false) {
+      return res.status(403).json({ error: validated.error });
+    }
+
+    const [updated] = await db
+      .update(platformSettings)
+      .set({
+        valueJson: validated.mergedValue,
+        updatedBy: req.authUser!.userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(platformSettings.id, existing.id))
+      .returning();
+
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'PLATFORM_SETTING_UPDATED',
+      entityType: 'platform_settings',
+      entityId: updated.id,
+      ip: req.ip,
+      details: {
+        settingKey: updated.settingKey,
+        valueJson: updated.valueJson,
+      },
+    });
+
+    res.json({ setting: updated });
   }
 );
 
