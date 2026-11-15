@@ -9,6 +9,7 @@ import {
   Eye,
   EyeOff,
   Mail,
+  CheckCircle2,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import {
@@ -34,6 +35,7 @@ const HumanityConnectShell: React.FC = () => {
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
   const [presetRole, setPresetRole] = useState<string>('SUPPORTIVE');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [portalBanner, setPortalBanner] = useState<string | null>(null);
 
   const [spModalOpen, setSpModalOpen] = useState(false);
   const [spEmail, setSpEmail] = useState('');
@@ -176,6 +178,7 @@ const HumanityConnectShell: React.FC = () => {
                   variant="ivory"
                   onClick={async () => {
                     await logout();
+                    setPortalBanner(null);
                     setRoute('public');
                   }}
                 >
@@ -282,6 +285,7 @@ const HumanityConnectShell: React.FC = () => {
                   className="w-full"
                   onClick={async () => {
                     await logout();
+                    setPortalBanner(null);
                     setRoute('public');
                     setMobileMenuOpen(false);
                   }}
@@ -318,7 +322,10 @@ const HumanityConnectShell: React.FC = () => {
             key={`${authMode}-${presetRole}`}
             initialMode={authMode}
             presetRole={presetRole}
-            onSuccess={() => setRoute('portal')}
+            onSuccess={(bannerMsg) => {
+              setPortalBanner(bannerMsg || null);
+              setRoute('portal');
+            }}
             onOpenSuperAdmin={() => {
               setSpError(null);
               setSpModalOpen(true);
@@ -335,7 +342,30 @@ const HumanityConnectShell: React.FC = () => {
             <AccountSecurityPanel />
           </div>
         ) : route === 'portal' && user ? (
-          renderActivePortal()
+          <>
+            {portalBanner && (
+              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+                <div
+                  role="status"
+                  className="p-3.5 rounded-xl bg-[#287A59]/10 border border-[#287A59]/25 text-sm text-[#287A59] flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span className="font-semibold">{portalBanner}</span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Dismiss confirmation"
+                    onClick={() => setPortalBanner(null)}
+                    className="p-1 text-[#287A59] hover:text-[#102E36]"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+            {renderActivePortal()}
+          </>
         ) : route === 'staff' ? (
           <StaffManagementCentre mode="public" onNavigateAuth={openAuth} />
         ) : (

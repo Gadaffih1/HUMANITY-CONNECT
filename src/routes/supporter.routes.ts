@@ -2,7 +2,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { eq, and, desc, sql, isNotNull, lte } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import {
   supporterProfiles,
   savedBeneficiaries,
@@ -222,53 +222,75 @@ supporterRouter.get('/portal', async (req: AuthRequest, res) => {
 });
 
 supporterRouter.patch('/preferences', async (req: AuthRequest, res) => {
-  const supporter = await getOrCreateSupporterProfile(
-    req.authUser!.userId,
-    req.authUser!.fullName,
-    req.authUser!.activeRole
-  );
-  const { anonymousGiving, displayName } = req.body as {
-    anonymousGiving?: boolean;
-    displayName?: string;
-  };
-  const [updated] = await db
-    .update(supporterProfiles)
-    .set({
-      anonymousGiving: anonymousGiving ?? supporter.anonymousGiving,
-      displayName: displayName ?? supporter.displayName,
-    })
-    .where(eq(supporterProfiles.id, supporter.id))
-    .returning();
-  res.json({ supporter: updated });
+  try {
+    const supporter = await withDbRetry(() =>
+      getOrCreateSupporterProfile(
+        req.authUser!.userId,
+        req.authUser!.fullName,
+        req.authUser!.activeRole
+      )
+    );
+    const { anonymousGiving, displayName } = req.body as {
+      anonymousGiving?: boolean;
+      displayName?: string;
+    };
+    const [updated] = await withDbRetry(() =>
+      db
+        .update(supporterProfiles)
+        .set({
+          anonymousGiving: anonymousGiving ?? supporter.anonymousGiving,
+          displayName: displayName ?? supporter.displayName,
+        })
+        .where(eq(supporterProfiles.id, supporter.id))
+        .returning()
+    );
+    res.json({ supporter: updated });
+  } catch (err) {
+    console.error('Supporter preferences update error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to update supporter preferences.' });
+  }
 });
 
 supporterRouter.post('/saved/:beneficiaryId', async (req: AuthRequest, res) => {
-  const supporter = await getOrCreateSupporterProfile(
-    req.authUser!.userId,
-    req.authUser!.fullName,
-    req.authUser!.activeRole
-  );
-  const beneficiaryId = String(req.params.beneficiaryId);
-  const [existing] = await db
-    .select()
-    .from(savedBeneficiaries)
-    .where(
-      and(
-        eq(savedBeneficiaries.supporterId, supporter.id),
-        eq(savedBeneficiaries.beneficiaryId, beneficiaryId)
+  try {
+    const supporter = await withDbRetry(() =>
+      getOrCreateSupporterProfile(
+        req.authUser!.userId,
+        req.authUser!.fullName,
+        req.authUser!.activeRole
       )
-    )
-    .limit(1);
+    );
+    const beneficiaryId = String(req.params.beneficiaryId);
+    const [existing] = await withDbRetry(() =>
+      db
+        .select()
+        .from(savedBeneficiaries)
+        .where(
+          and(
+            eq(savedBeneficiaries.supporterId, supporter.id),
+            eq(savedBeneficiaries.beneficiaryId, beneficiaryId)
+          )
+        )
+        .limit(1)
+    );
 
-  if (existing) {
-    await db.delete(savedBeneficiaries).where(eq(savedBeneficiaries.id, existing.id));
-    return res.json({ saved: false });
+    if (existing) {
+      await withDbRetry(() =>
+        db.delete(savedBeneficiaries).where(eq(savedBeneficiaries.id, existing.id))
+      );
+      return res.json({ saved: false });
+    }
+    await withDbRetry(() =>
+      db.insert(savedBeneficiaries).values({
+        supporterId: supporter.id,
+        beneficiaryId,
+      })
+    );
+    res.json({ saved: true });
+  } catch (err) {
+    console.error('Saved beneficiary toggle error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to update saved beneficiaries.' });
   }
-  await db.insert(savedBeneficiaries).values({
-    supporterId: supporter.id,
-    beneficiaryId,
-  });
-  res.json({ saved: true });
 });
 
 // Checkout: strictly creates PLEDGE or INITIATED payment intent. NEVER marks payment successful without server-side callback verification!
@@ -519,74 +541,96 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
 });
 
 supporterRouter.patch('/recurring/:id', async (req: AuthRequest, res) => {
-  const supporter = await getOrCreateSupporterProfile(
-    req.authUser!.userId,
-    req.authUser!.fullName,
-    req.authUser!.activeRole
-  );
-  const { status } = req.body as { status?: 'ACTIVE' | 'PAUSED' | 'CANCELLED' };
-  if (!status) return res.status(400).json({ error: 'Valid recurring status required.' });
-
-  const [updated] = await db
-    .update(recurringSchedules)
-    .set({ status })
-    .where(
-      and(
-        eq(recurringSchedules.id, String(req.params.id)),
-        eq(recurringSchedules.supporterId, supporter.id)
+  try {
+    const supporter = await withDbRetry(() =>
+      getOrCreateSupporterProfile(
+        req.authUser!.userId,
+        req.authUser!.fullName,
+        req.authUser!.activeRole
       )
-    )
-    .returning();
+    );
+    const { status } = req.body as { status?: 'ACTIVE' | 'PAUSED' | 'CANCELLED' };
+    if (!status) return res.status(400).json({ error: 'Valid recurring status required.' });
 
-  // Notify linked beneficiary when a sponsorship schedule changes
-  if (updated?.sponsorshipId) {
-    const [sp] = await db
-      .select({ beneficiaryId: sponsorships.beneficiaryId })
-      .from(sponsorships)
-      .where(eq(sponsorships.id, updated.sponsorshipId))
-      .limit(1);
-    if (sp) {
-      const [bp] = await db
-        .select({ userId: beneficiaryProfiles.userId })
-        .from(beneficiaryProfiles)
-        .where(eq(beneficiaryProfiles.id, sp.beneficiaryId))
-        .limit(1);
-      if (bp) {
-        await db.insert(notifications).values({
-          userId: bp.userId,
-          category: 'SPONSORSHIP',
-          title: `Sponsorship Agreement ${updated.agreementReference} Updated`,
-          body: `Your recurring sponsorship status is now ${status}. Our verification team remains available for support.`,
-        });
+    const [updated] = await withDbRetry(() =>
+      db
+        .update(recurringSchedules)
+        .set({ status })
+        .where(
+          and(
+            eq(recurringSchedules.id, String(req.params.id)),
+            eq(recurringSchedules.supporterId, supporter.id)
+          )
+        )
+        .returning()
+    );
+
+    // Notify linked beneficiary when a sponsorship schedule changes
+    if (updated?.sponsorshipId) {
+      const [sp] = await withDbRetry(() =>
+        db
+          .select({ beneficiaryId: sponsorships.beneficiaryId })
+          .from(sponsorships)
+          .where(eq(sponsorships.id, updated.sponsorshipId!))
+          .limit(1)
+      );
+      if (sp) {
+        const [bp] = await withDbRetry(() =>
+          db
+            .select({ userId: beneficiaryProfiles.userId })
+            .from(beneficiaryProfiles)
+            .where(eq(beneficiaryProfiles.id, sp.beneficiaryId))
+            .limit(1)
+        );
+        if (bp) {
+          await withDbRetry(() =>
+            db.insert(notifications).values({
+              userId: bp.userId,
+              category: 'SPONSORSHIP',
+              title: `Sponsorship Agreement ${updated.agreementReference} Updated`,
+              body: `Your recurring sponsorship status is now ${status}. Our verification team remains available for support.`,
+            })
+          );
+        }
       }
     }
-  }
 
-  res.json({ schedule: updated });
+    res.json({ schedule: updated });
+  } catch (err) {
+    console.error('Recurring schedule update error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to update recurring sponsorship schedule.' });
+  }
 });
 
 supporterRouter.post('/volunteer', async (req: AuthRequest, res) => {
-  const { county, skillsSummary, projectId, scheduledDate } = req.body as {
-    county?: string;
-    skillsSummary?: string;
-    projectId?: string;
-    scheduledDate?: string;
-  };
-  if (!county || !skillsSummary) {
-    return res.status(400).json({ error: 'County and skills summary are required.' });
-  }
-  const [assignment] = await db
-    .insert(volunteerAssignments)
-    .values({
-      userId: req.authUser!.userId,
-      assignmentType: 'COMMUNITY_PROJECT',
-      county,
-      projectId: projectId || null,
-      skillsSummary,
-      scheduledDate: scheduledDate || new Date().toISOString().slice(0, 10),
-      status: 'ASSIGNED',
-    })
-    .returning();
+  try {
+    const { county, skillsSummary, projectId, scheduledDate } = req.body as {
+      county?: string;
+      skillsSummary?: string;
+      projectId?: string;
+      scheduledDate?: string;
+    };
+    if (!county || !skillsSummary) {
+      return res.status(400).json({ error: 'County and skills summary are required.' });
+    }
+    const [assignment] = await withDbRetry(() =>
+      db
+        .insert(volunteerAssignments)
+        .values({
+          userId: req.authUser!.userId,
+          assignmentType: 'COMMUNITY_PROJECT',
+          county,
+          projectId: projectId || null,
+          skillsSummary,
+          scheduledDate: scheduledDate || new Date().toISOString().slice(0, 10),
+          status: 'ASSIGNED',
+        })
+        .returning()
+    );
 
-  res.status(201).json({ assignment });
+    res.status(201).json({ assignment });
+  } catch (err) {
+    console.error('Volunteer assignment error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to submit volunteer assignment.' });
+  }
 });

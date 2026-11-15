@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { eq, and, desc, isNull, gt, ne, sql, or } from 'drizzle-orm';
 import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import { provisionSuperAdmin } from '../db/superAdmin.ts';
-import { ensureSupporterRegistrationSchema } from '../db/registrationSchema.ts';
+import { ensureRegistrationSchemaReady } from '../db/registrationSchema.ts';
 import {
   users,
   roles,
@@ -92,14 +92,24 @@ function generateReferenceCode(prefix: string): string {
 
 authRouter.post('/register', async (req, res) => {
   try {
-    const parsed = registerSchema.safeParse(req.body);
+    const rawBody = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const rawEmail = typeof rawBody.email === 'string' ? rawBody.email.trim() : '';
+    const rawPassword = typeof rawBody.password === 'string' ? rawBody.password : '';
+    const rawFullName = typeof rawBody.fullName === 'string' ? rawBody.fullName.trim() : '';
+    const rawRoles = Array.isArray(rawBody.selectedRoles) ? rawBody.selectedRoles : [];
+
+    if (!rawEmail || !rawPassword || !rawFullName || rawRoles.length === 0) {
+      return res.status(400).json({ error: 'Please complete all required fields.' });
+    }
+
+    const parsed = registerSchema.safeParse(rawBody);
     if (!parsed.success) {
       const flat = parsed.error.flatten();
       const firstFieldMsg = Object.values(flat.fieldErrors).flat()[0];
       const msg =
         firstFieldMsg ||
         flat.formErrors[0] ||
-        'Invalid registration details. Please check your entries.';
+        'Invalid registration information.';
       return res.status(400).json({ error: msg, details: flat });
     }
     const data = parsed.data;
@@ -120,9 +130,13 @@ authRouter.post('/register', async (req, res) => {
       : null;
     if (normalizedPhone && !normalizedPhone.ok) {
       return res.status(400).json({
-        error: normalizedPhone.error || 'Invalid Kenyan phone format (use +2547XXXXXXXX or 07XXXXXXXX).',
+        error: normalizedPhone.error || 'Invalid registration information.',
       });
     }
+
+    await ensureRegistrationSchemaReady().catch((schemaErr) => {
+      console.warn('Registration schema check warning (non-fatal):', schemaErr);
+    });
 
     const [existingEmail] = await withDbRetry(() =>
       db
@@ -133,7 +147,7 @@ authRouter.post('/register', async (req, res) => {
     );
     if (existingEmail) {
       return res.status(409).json({
-        error: 'An account with this email address already exists. Only one account can be registered per email.',
+        error: 'Email address already registered.',
       });
     }
 
@@ -158,15 +172,9 @@ authRouter.post('/register', async (req, res) => {
       );
       if (existingPhone) {
         return res.status(409).json({
-          error: 'An account with this phone number already exists. Only one account can be registered per phone number.',
+          error: 'Telephone number already registered.',
         });
       }
-    }
-
-    if (validRoles[0] === 'SUPPORTIVE' || validRoles[0] === 'WELL_WISHER') {
-      await ensureSupporterRegistrationSchema().catch((schemaErr) => {
-        console.warn('Supporter schema check warning (non-fatal):', schemaErr);
-      });
     }
 
     const passwordHash = await hashPassword(data.password);
@@ -433,6 +441,7 @@ authRouter.post('/register', async (req, res) => {
 
     setSessionCookie(req, res, token);
     res.status(201).json({
+      message: 'Registration successful.',
       token,
       user: authUser,
       verificationHints: {
@@ -461,32 +470,33 @@ authRouter.post('/register', async (req, res) => {
             column?: string;
             constraint?: string;
           });
+    const pgCode = cause.code || outer.code;
     console.error('Registration failed:', {
       message: cause.message || outer.message,
-      code: cause.code || outer.code,
+      code: pgCode,
       table: cause.table,
       column: cause.column,
       constraint: cause.constraint,
     });
-    if ((cause.code || outer.code) === '23505') {
+    if (pgCode === '23505') {
       if (cause.constraint?.toLowerCase().includes('phone')) {
         return res.status(409).json({
-          error: 'An account with this phone number already exists. Only one account can be registered per phone number.',
+          error: 'Telephone number already registered.',
         });
       }
       if (cause.constraint?.toLowerCase().includes('email')) {
         return res.status(409).json({
-          error: 'An account with this email address already exists. Only one account can be registered per email.',
+          error: 'Email address already registered.',
         });
       }
       return res.status(409).json({ error: 'An account with these details already exists.' });
     }
-    if (isTransientDbError(err)) {
+    if (isTransientDbError(err) || pgCode === '42P01' || pgCode === '42703') {
       return res.status(503).json({
-        error: 'Database service temporarily busy. Please retry registration shortly.',
+        error: 'Registration temporarily unavailable. Please try again later.',
       });
     }
-    res.status(500).json({ error: 'Unable to create your account. Please try again or contact support.' });
+    res.status(500).json({ error: 'Registration temporarily unavailable. Please try again later.' });
   }
 });
 
@@ -672,394 +682,521 @@ authRouter.get('/me', requireAuth, async (req: AuthRequest, res) => {
 });
 
 authRouter.post('/switch-role', requireAuth, async (req: AuthRequest, res) => {
-  const { role } = req.body as { role?: string };
-  if (!role || !req.authUser!.roles.includes(role as RoleCode)) {
-    return res.status(403).json({
-      error: 'You are not authorised to switch to this role.',
+  try {
+    const { role } = req.body as { role?: string };
+    if (!role || !req.authUser!.roles.includes(role as RoleCode)) {
+      return res.status(403).json({
+        error: 'You are not authorised to switch to this role.',
+      });
+    }
+    if (req.authUser!.sessionId) {
+      await withDbRetry(() =>
+        db
+          .update(userSessions)
+          .set({ activeRoleCode: role })
+          .where(eq(userSessions.id, req.authUser!.sessionId!))
+      );
+    }
+    const updated = await loadUserAuthContext(
+      req.authUser!.userId,
+      role,
+      req.authUser!.mfaVerifiedInSession,
+      req.authUser!.sessionId
+    );
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: role,
+      action: 'ROLE_SWITCHED',
+      entityType: 'user_sessions',
+      entityId: req.authUser!.sessionId,
+      ip: req.ip,
+      details: { activeRole: role },
+    });
+    res.json({ user: updated });
+  } catch (err) {
+    console.error('Switch role error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to switch active role right now. Please try again.',
     });
   }
-  if (req.authUser!.sessionId) {
-    await db
-      .update(userSessions)
-      .set({ activeRoleCode: role })
-      .where(eq(userSessions.id, req.authUser!.sessionId));
-  }
-  const updated = await loadUserAuthContext(
-    req.authUser!.userId,
-    role,
-    req.authUser!.mfaVerifiedInSession,
-    req.authUser!.sessionId
-  );
-  await writeAuditLog({
-    actorUserId: req.authUser!.userId,
-    actorRole: role,
-    action: 'ROLE_SWITCHED',
-    entityType: 'user_sessions',
-    entityId: req.authUser!.sessionId,
-    ip: req.ip,
-    details: { activeRole: role },
-  });
-  res.json({ user: updated });
 });
 
 authRouter.post('/verify-phone/send', requireAuth, async (req: AuthRequest, res) => {
-  const { phoneE164 } = req.body as { phoneE164?: string };
-  const rawPhone = (phoneE164 || req.authUser!.phoneE164 || '').trim();
-  const norm = normalizeKenyanMsisdn(rawPhone);
-  if (!norm.ok) {
-    return res.status(400).json({
-      error: norm.error || 'Valid phone number (e.g. +2547XXXXXXXX or 07XXXXXXXX) is required.',
+  try {
+    const { phoneE164 } = req.body as { phoneE164?: string };
+    const rawPhone = (phoneE164 || req.authUser!.phoneE164 || '').trim();
+    const norm = normalizeKenyanMsisdn(rawPhone);
+    if (!norm.ok) {
+      return res.status(400).json({
+        error: norm.error || 'Valid phone number (e.g. +2547XXXXXXXX or 07XXXXXXXX) is required.',
+      });
+    }
+
+    const [phoneInUse] = await withDbRetry(() =>
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.phoneE164, norm.e164), ne(users.id, req.authUser!.userId)))
+        .limit(1)
+    );
+    if (phoneInUse) {
+      return res.status(409).json({
+        error: 'Telephone number already registered.',
+      });
+    }
+
+    await withDbRetry(() =>
+      db
+        .update(users)
+        .set({ phoneE164: norm.e164 })
+        .where(eq(users.id, req.authUser!.userId))
+    );
+
+    const otp = generateNumericOtp(6);
+    await withDbRetry(() =>
+      db.insert(verificationTokens).values({
+        userId: req.authUser!.userId,
+        channel: 'PHONE_OTP',
+        target: norm.e164,
+        codeHash: sha256Hex(otp),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      })
+    );
+
+    const smsResult = await dispatchTalksasaSms({
+      recipientPhone: norm.e164,
+      message: `Humanity Connect OTP: ${otp}. Valid for 10 minutes.`,
+      templateCode: 'OTP',
+      userId: req.authUser!.userId,
     });
-  }
 
-  const [phoneInUse] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(and(eq(users.phoneE164, norm.e164), ne(users.id, req.authUser!.userId)))
-    .limit(1);
-  if (phoneInUse) {
-    return res.status(409).json({
-      error: 'This phone number is already linked to another Humanity Connect account.',
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'PHONE_OTP_DISPATCHED',
+      entityType: 'talksasa_sms_logs',
+      entityId: smsResult.logId,
+      ip: req.ip,
+      details: {
+        dispatchRef: smsResult.dispatchRef,
+        deliveryStatus: smsResult.deliveryStatus,
+        gatewayLive: smsResult.gatewayLive,
+      },
     });
-  }
 
-  await db
-    .update(users)
-    .set({ phoneE164: norm.e164 })
-    .where(eq(users.id, req.authUser!.userId));
-
-  const otp = generateNumericOtp(6);
-  await db.insert(verificationTokens).values({
-    userId: req.authUser!.userId,
-    channel: 'PHONE_OTP',
-    target: norm.e164,
-    codeHash: sha256Hex(otp),
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-  });
-
-  const smsResult = await dispatchTalksasaSms({
-    recipientPhone: norm.e164,
-    message: `Humanity Connect OTP: ${otp}. Valid for 10 minutes.`,
-    templateCode: 'OTP',
-    userId: req.authUser!.userId,
-  });
-
-  await writeAuditLog({
-    actorUserId: req.authUser!.userId,
-    actorRole: req.authUser!.activeRole,
-    action: 'PHONE_OTP_DISPATCHED',
-    entityType: 'talksasa_sms_logs',
-    entityId: smsResult.logId,
-    ip: req.ip,
-    details: {
+    res.json({
+      sent: true,
+      targetMasked: norm.masked,
       dispatchRef: smsResult.dispatchRef,
       deliveryStatus: smsResult.deliveryStatus,
       gatewayLive: smsResult.gatewayLive,
-    },
-  });
-
-  res.json({
-    sent: true,
-    targetMasked: norm.masked,
-    dispatchRef: smsResult.dispatchRef,
-    deliveryStatus: smsResult.deliveryStatus,
-    gatewayLive: smsResult.gatewayLive,
-    sandboxOtp:
-      process.env.NODE_ENV === 'production' || (smsResult.gatewayLive && smsResult.deliveryStatus === 'SENT')
-        ? undefined
-        : otp,
-  });
+      sandboxOtp:
+        process.env.NODE_ENV === 'production' || (smsResult.gatewayLive && smsResult.deliveryStatus === 'SENT')
+          ? undefined
+          : otp,
+    });
+  } catch (err) {
+    console.error('Send phone OTP error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to send phone verification code right now. Please try again.',
+    });
+  }
 });
 
 authRouter.post('/verify-phone/confirm', requireAuth, async (req: AuthRequest, res) => {
-  const { code } = req.body as { code?: string };
-  if (!code || !/^\d{6}$/.test(code.trim())) {
-    return res.status(400).json({ error: 'Enter the 6-digit phone verification code.' });
+  try {
+    const { code } = req.body as { code?: string };
+    if (!code || !/^\d{6}$/.test(code.trim())) {
+      return res.status(400).json({ error: 'Enter the 6-digit phone verification code.' });
+    }
+    const [tokenRow] = await withDbRetry(() =>
+      db
+        .select()
+        .from(verificationTokens)
+        .where(
+          and(
+            eq(verificationTokens.userId, req.authUser!.userId),
+            eq(verificationTokens.channel, 'PHONE_OTP'),
+            isNull(verificationTokens.consumedAt),
+            gt(verificationTokens.expiresAt, new Date())
+          )
+        )
+        .orderBy(desc(verificationTokens.createdAt))
+        .limit(1)
+    );
+
+    if (!tokenRow || tokenRow.attempts >= 5) {
+      return res.status(400).json({ error: 'OTP expired or maximum attempts reached. Request a new code.' });
+    }
+    if (tokenRow.codeHash !== sha256Hex(code.trim())) {
+      await withDbRetry(() =>
+        db
+          .update(verificationTokens)
+          .set({ attempts: tokenRow.attempts + 1 })
+          .where(eq(verificationTokens.id, tokenRow.id))
+      );
+      return res.status(400).json({ error: 'Incorrect verification code.' });
+    }
+
+    await withDbRetry(() =>
+      db
+        .update(verificationTokens)
+        .set({ consumedAt: new Date() })
+        .where(eq(verificationTokens.id, tokenRow.id))
+    );
+    await withDbRetry(() =>
+      db
+        .update(users)
+        .set({ phoneVerifiedAt: new Date() })
+        .where(eq(users.id, req.authUser!.userId))
+    );
+
+    await writeAuditLog({
+      actorUserId: req.authUser!.userId,
+      actorRole: req.authUser!.activeRole,
+      action: 'PHONE_VERIFIED',
+      entityType: 'users',
+      entityId: req.authUser!.userId,
+      ip: req.ip,
+    });
+
+    const user = await loadUserAuthContext(
+      req.authUser!.userId,
+      req.authUser!.activeRole,
+      req.authUser!.mfaVerifiedInSession,
+      req.authUser!.sessionId
+    );
+    res.json({ verified: true, user });
+  } catch (err) {
+    console.error('Confirm phone OTP error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to verify phone number right now. Please try again.',
+    });
   }
-  const [tokenRow] = await db
-    .select()
-    .from(verificationTokens)
-    .where(
-      and(
-        eq(verificationTokens.userId, req.authUser!.userId),
-        eq(verificationTokens.channel, 'PHONE_OTP'),
-        isNull(verificationTokens.consumedAt),
-        gt(verificationTokens.expiresAt, new Date())
-      )
-    )
-    .orderBy(desc(verificationTokens.createdAt))
-    .limit(1);
-
-  if (!tokenRow || tokenRow.attempts >= 5) {
-    return res.status(400).json({ error: 'OTP expired or maximum attempts reached. Request a new code.' });
-  }
-  if (tokenRow.codeHash !== sha256Hex(code.trim())) {
-    await db
-      .update(verificationTokens)
-      .set({ attempts: tokenRow.attempts + 1 })
-      .where(eq(verificationTokens.id, tokenRow.id));
-    return res.status(400).json({ error: 'Incorrect verification code.' });
-  }
-
-  await db
-    .update(verificationTokens)
-    .set({ consumedAt: new Date() })
-    .where(eq(verificationTokens.id, tokenRow.id));
-  await db
-    .update(users)
-    .set({ phoneVerifiedAt: new Date() })
-    .where(eq(users.id, req.authUser!.userId));
-
-  await writeAuditLog({
-    actorUserId: req.authUser!.userId,
-    actorRole: req.authUser!.activeRole,
-    action: 'PHONE_VERIFIED',
-    entityType: 'users',
-    entityId: req.authUser!.userId,
-    ip: req.ip,
-  });
-
-  const user = await loadUserAuthContext(
-    req.authUser!.userId,
-    req.authUser!.activeRole,
-    req.authUser!.mfaVerifiedInSession,
-    req.authUser!.sessionId
-  );
-  res.json({ verified: true, user });
 });
 
 authRouter.post('/verify-email/send', requireAuth, async (req: AuthRequest, res) => {
-  const code = generateNumericOtp(6);
-  await db.insert(verificationTokens).values({
-    userId: req.authUser!.userId,
-    channel: 'EMAIL_VERIFY',
-    target: req.authUser!.email,
-    codeHash: sha256Hex(code),
-    expiresAt: new Date(Date.now() + 30 * 60 * 1000),
-  });
-  res.json({
-    sent: true,
-    sandboxCode: process.env.NODE_ENV === 'production' ? undefined : code,
-  });
+  try {
+    const code = generateNumericOtp(6);
+    await withDbRetry(() =>
+      db.insert(verificationTokens).values({
+        userId: req.authUser!.userId,
+        channel: 'EMAIL_VERIFY',
+        target: req.authUser!.email,
+        codeHash: sha256Hex(code),
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      })
+    );
+    res.json({
+      sent: true,
+      sandboxCode: process.env.NODE_ENV === 'production' ? undefined : code,
+    });
+  } catch (err) {
+    console.error('Send email verify error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to issue email verification code right now.',
+    });
+  }
 });
 
 authRouter.post('/verify-email/confirm', requireAuth, async (req: AuthRequest, res) => {
-  const { code } = req.body as { code?: string };
-  if (!code) return res.status(400).json({ error: 'Verification code required.' });
-  const [tokenRow] = await db
-    .select()
-    .from(verificationTokens)
-    .where(
-      and(
-        eq(verificationTokens.userId, req.authUser!.userId),
-        eq(verificationTokens.channel, 'EMAIL_VERIFY'),
-        isNull(verificationTokens.consumedAt),
-        gt(verificationTokens.expiresAt, new Date())
-      )
-    )
-    .orderBy(desc(verificationTokens.createdAt))
-    .limit(1);
+  try {
+    const { code } = req.body as { code?: string };
+    if (!code) return res.status(400).json({ error: 'Verification code required.' });
+    const [tokenRow] = await withDbRetry(() =>
+      db
+        .select()
+        .from(verificationTokens)
+        .where(
+          and(
+            eq(verificationTokens.userId, req.authUser!.userId),
+            eq(verificationTokens.channel, 'EMAIL_VERIFY'),
+            isNull(verificationTokens.consumedAt),
+            gt(verificationTokens.expiresAt, new Date())
+          )
+        )
+        .orderBy(desc(verificationTokens.createdAt))
+        .limit(1)
+    );
 
-  if (!tokenRow || tokenRow.codeHash !== sha256Hex(code.trim())) {
-    return res.status(400).json({ error: 'Invalid or expired email verification code.' });
+    if (!tokenRow || tokenRow.codeHash !== sha256Hex(code.trim())) {
+      return res.status(400).json({ error: 'Invalid or expired email verification code.' });
+    }
+    await withDbRetry(() =>
+      db
+        .update(verificationTokens)
+        .set({ consumedAt: new Date() })
+        .where(eq(verificationTokens.id, tokenRow.id))
+    );
+    await withDbRetry(() =>
+      db
+        .update(users)
+        .set({ emailVerifiedAt: new Date() })
+        .where(eq(users.id, req.authUser!.userId))
+    );
+
+    const user = await loadUserAuthContext(
+      req.authUser!.userId,
+      req.authUser!.activeRole,
+      req.authUser!.mfaVerifiedInSession,
+      req.authUser!.sessionId
+    );
+    res.json({ verified: true, user });
+  } catch (err) {
+    console.error('Confirm email verify error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to confirm email verification right now.',
+    });
   }
-  await db
-    .update(verificationTokens)
-    .set({ consumedAt: new Date() })
-    .where(eq(verificationTokens.id, tokenRow.id));
-  await db
-    .update(users)
-    .set({ emailVerifiedAt: new Date() })
-    .where(eq(users.id, req.authUser!.userId));
-
-  const user = await loadUserAuthContext(
-    req.authUser!.userId,
-    req.authUser!.activeRole,
-    req.authUser!.mfaVerifiedInSession,
-    req.authUser!.sessionId
-  );
-  res.json({ verified: true, user });
 });
 
 authRouter.post('/password-reset/request', async (req, res) => {
-  const { email } = req.body as { email?: string };
-  if (!email) return res.status(400).json({ error: 'Email is required.' });
-  const [userRow] = await db
-    .select({ id: users.id, email: users.email })
-    .from(users)
-    .where(eq(users.email, email.trim().toLowerCase()))
-    .limit(1);
-  let sandboxCode: string | undefined;
-  if (userRow) {
-    const code = generateNumericOtp(6);
-    sandboxCode = process.env.NODE_ENV === 'production' ? undefined : code;
-    await db.insert(verificationTokens).values({
-      userId: userRow.id,
-      channel: 'PASSWORD_RESET',
-      target: userRow.email,
-      codeHash: sha256Hex(code),
-      expiresAt: new Date(Date.now() + 20 * 60 * 1000),
+  try {
+    const { email } = req.body as { email?: string };
+    if (!email || !email.trim()) return res.status(400).json({ error: 'Email is required.' });
+    const [userRow] = await withDbRetry(() =>
+      db
+        .select({ id: users.id, email: users.email })
+        .from(users)
+        .where(eq(users.email, email.trim().toLowerCase()))
+        .limit(1)
+    );
+    let sandboxCode: string | undefined;
+    if (userRow) {
+      const code = generateNumericOtp(6);
+      sandboxCode = process.env.NODE_ENV === 'production' ? undefined : code;
+      await withDbRetry(() =>
+        db.insert(verificationTokens).values({
+          userId: userRow.id,
+          channel: 'PASSWORD_RESET',
+          target: userRow.email,
+          codeHash: sha256Hex(code),
+          expiresAt: new Date(Date.now() + 20 * 60 * 1000),
+        })
+      );
+    }
+    res.json({
+      message: 'If an account matches this email, a reset verification code has been issued.',
+      sandboxCode,
+    });
+  } catch (err) {
+    console.error('Password reset request error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to process password reset request right now. Please try again later.',
     });
   }
-  res.json({
-    message: 'If an account matches this email, a reset verification code has been issued.',
-    sandboxCode,
-  });
 });
 
 authRouter.post('/password-reset/confirm', async (req, res) => {
-  const { email, code, newPassword } = req.body as {
-    email?: string;
-    code?: string;
-    newPassword?: string;
-  };
-  if (!email || !code || !newPassword || newPassword.length < 8) {
-    return res.status(400).json({ error: 'Email, 6-digit code, and 8+ character password required.' });
+  try {
+    const { email, code, newPassword } = req.body as {
+      email?: string;
+      code?: string;
+      newPassword?: string;
+    };
+    if (!email || !code || !newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: 'Email, 6-digit code, and 8+ character password required.' });
+    }
+    const [userRow] = await withDbRetry(() =>
+      db
+        .select()
+        .from(users)
+        .where(eq(users.email, email.trim().toLowerCase()))
+        .limit(1)
+    );
+    if (!userRow) return res.status(400).json({ error: 'Invalid reset request.' });
+
+    const [tokenRow] = await withDbRetry(() =>
+      db
+        .select()
+        .from(verificationTokens)
+        .where(
+          and(
+            eq(verificationTokens.userId, userRow.id),
+            eq(verificationTokens.channel, 'PASSWORD_RESET'),
+            isNull(verificationTokens.consumedAt),
+            gt(verificationTokens.expiresAt, new Date())
+          )
+        )
+        .orderBy(desc(verificationTokens.createdAt))
+        .limit(1)
+    );
+
+    if (!tokenRow || tokenRow.codeHash !== sha256Hex(code.trim())) {
+      return res.status(400).json({ error: 'Invalid or expired password reset code.' });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await withDbRetry(() =>
+      db
+        .update(verificationTokens)
+        .set({ consumedAt: new Date() })
+        .where(eq(verificationTokens.id, tokenRow.id))
+    );
+    await withDbRetry(() =>
+      db
+        .update(users)
+        .set({ passwordHash: newHash, failedLoginAttempts: 0, lockedUntil: null })
+        .where(eq(users.id, userRow.id))
+    );
+    // Revoke existing sessions on password reset
+    await withDbRetry(() =>
+      db
+        .update(userSessions)
+        .set({ revokedAt: new Date() })
+        .where(eq(userSessions.userId, userRow.id))
+    );
+
+    await writeAuditLog({
+      actorUserId: userRow.id,
+      actorRole: 'USER',
+      action: 'PASSWORD_RESET_COMPLETED',
+      entityType: 'users',
+      entityId: userRow.id,
+      ip: req.ip,
+    });
+
+    res.json({ reset: true });
+  } catch (err) {
+    console.error('Password reset confirm error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to complete password reset right now. Please try again later.',
+    });
   }
-  const [userRow] = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, email.trim().toLowerCase()))
-    .limit(1);
-  if (!userRow) return res.status(400).json({ error: 'Invalid reset request.' });
-
-  const [tokenRow] = await db
-    .select()
-    .from(verificationTokens)
-    .where(
-      and(
-        eq(verificationTokens.userId, userRow.id),
-        eq(verificationTokens.channel, 'PASSWORD_RESET'),
-        isNull(verificationTokens.consumedAt),
-        gt(verificationTokens.expiresAt, new Date())
-      )
-    )
-    .orderBy(desc(verificationTokens.createdAt))
-    .limit(1);
-
-  if (!tokenRow || tokenRow.codeHash !== sha256Hex(code.trim())) {
-    return res.status(400).json({ error: 'Invalid or expired password reset code.' });
-  }
-
-  const newHash = await hashPassword(newPassword);
-  await db
-    .update(verificationTokens)
-    .set({ consumedAt: new Date() })
-    .where(eq(verificationTokens.id, tokenRow.id));
-  await db
-    .update(users)
-    .set({ passwordHash: newHash, failedLoginAttempts: 0, lockedUntil: null })
-    .where(eq(users.id, userRow.id));
-  // Revoke existing sessions on password reset
-  await db
-    .update(userSessions)
-    .set({ revokedAt: new Date() })
-    .where(eq(userSessions.userId, userRow.id));
-
-  await writeAuditLog({
-    actorUserId: userRow.id,
-    actorRole: 'USER',
-    action: 'PASSWORD_RESET_COMPLETED',
-    entityType: 'users',
-    entityId: userRow.id,
-    ip: req.ip,
-  });
-
-  res.json({ reset: true });
 });
 
 authRouter.post('/mfa/setup', requireAuth, async (req: AuthRequest, res) => {
-  const secret = generateTotpSecret();
-  await db
-    .update(users)
-    .set({ mfaSecretEnc: encryptSensitiveText(secret) })
-    .where(eq(users.id, req.authUser!.userId));
+  try {
+    const secret = generateTotpSecret();
+    await withDbRetry(() =>
+      db
+        .update(users)
+        .set({ mfaSecretEnc: encryptSensitiveText(secret) })
+        .where(eq(users.id, req.authUser!.userId))
+    );
 
-  const otpauthUri = `otpauth://totp/HumanityConnect:${encodeURIComponent(req.authUser!.email)}?secret=${secret}&issuer=HumanityConnect`;
-  res.json({
-    secret,
-    otpauthUri,
-    currentVerificationHint:
-      process.env.NODE_ENV === 'production' ? undefined : computeTotpCode(secret),
-  });
+    const otpauthUri = `otpauth://totp/HumanityConnect:${encodeURIComponent(req.authUser!.email)}?secret=${secret}&issuer=HumanityConnect`;
+    res.json({
+      secret,
+      otpauthUri,
+      currentVerificationHint:
+        process.env.NODE_ENV === 'production' ? undefined : computeTotpCode(secret),
+    });
+  } catch (err) {
+    console.error('MFA setup error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to initialize MFA setup right now.',
+    });
+  }
 });
 
 authRouter.post('/mfa/verify', requireAuth, async (req: AuthRequest, res) => {
-  const { code } = req.body as { code?: string };
-  if (!code) return res.status(400).json({ error: '6-digit MFA code required.' });
-  const [userRow] = await db
-    .select()
-    .from(users)
-    .where(eq(users.id, req.authUser!.userId))
-    .limit(1);
-  if (!userRow?.mfaSecretEnc) {
-    return res.status(400).json({ error: 'MFA has not been initialized for this account.' });
-  }
-  const secret = decryptSensitiveText(userRow.mfaSecretEnc);
-  if (!verifyTotpCode(secret, code)) {
-    return res.status(401).json({ error: 'Invalid MFA authenticator code.' });
-  }
-  await db
-    .update(users)
-    .set({ mfaEnabled: true })
-    .where(eq(users.id, userRow.id));
+  try {
+    const { code } = req.body as { code?: string };
+    if (!code) return res.status(400).json({ error: '6-digit MFA code required.' });
+    const [userRow] = await withDbRetry(() =>
+      db
+        .select()
+        .from(users)
+        .where(eq(users.id, req.authUser!.userId))
+        .limit(1)
+    );
+    if (!userRow?.mfaSecretEnc) {
+      return res.status(400).json({ error: 'MFA has not been initialized for this account.' });
+    }
+    const secret = decryptSensitiveText(userRow.mfaSecretEnc);
+    if (!verifyTotpCode(secret, code)) {
+      return res.status(401).json({ error: 'Invalid MFA authenticator code.' });
+    }
+    await withDbRetry(() =>
+      db
+        .update(users)
+        .set({ mfaEnabled: true })
+        .where(eq(users.id, userRow.id))
+    );
 
-  if (req.authUser!.sessionId) {
-    await db
-      .update(userSessions)
-      .set({ mfaVerifiedAt: new Date() })
-      .where(eq(userSessions.id, req.authUser!.sessionId));
+    if (req.authUser!.sessionId) {
+      await withDbRetry(() =>
+        db
+          .update(userSessions)
+          .set({ mfaVerifiedAt: new Date() })
+          .where(eq(userSessions.id, req.authUser!.sessionId!))
+      );
+    }
+
+    await writeAuditLog({
+      actorUserId: userRow.id,
+      actorRole: req.authUser!.activeRole,
+      action: 'MFA_VERIFIED',
+      entityType: 'users',
+      entityId: userRow.id,
+      ip: req.ip,
+    });
+
+    const user = await loadUserAuthContext(
+      userRow.id,
+      req.authUser!.activeRole,
+      true,
+      req.authUser!.sessionId
+    );
+    res.json({ verified: true, user });
+  } catch (err) {
+    console.error('MFA verify error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to verify MFA code right now.',
+    });
   }
-
-  await writeAuditLog({
-    actorUserId: userRow.id,
-    actorRole: req.authUser!.activeRole,
-    action: 'MFA_VERIFIED',
-    entityType: 'users',
-    entityId: userRow.id,
-    ip: req.ip,
-  });
-
-  const user = await loadUserAuthContext(
-    userRow.id,
-    req.authUser!.activeRole,
-    true,
-    req.authUser!.sessionId
-  );
-  res.json({ verified: true, user });
 });
 
 authRouter.get('/sessions', requireAuth, async (req: AuthRequest, res) => {
-  const list = await db
-    .select({
-      id: userSessions.id,
-      deviceLabel: userSessions.deviceLabel,
-      activeRoleCode: userSessions.activeRoleCode,
-      mfaVerifiedAt: userSessions.mfaVerifiedAt,
-      lastSeenAt: userSessions.lastSeenAt,
-      expiresAt: userSessions.expiresAt,
-      revokedAt: userSessions.revokedAt,
-      createdAt: userSessions.createdAt,
-    })
-    .from(userSessions)
-    .where(eq(userSessions.userId, req.authUser!.userId))
-    .orderBy(desc(userSessions.lastSeenAt));
-  res.json({
-    sessions: list.map((s) => ({ ...s, isCurrent: s.id === req.authUser!.sessionId })),
-  });
+  try {
+    const list = await withDbRetry(() =>
+      db
+        .select({
+          id: userSessions.id,
+          deviceLabel: userSessions.deviceLabel,
+          activeRoleCode: userSessions.activeRoleCode,
+          mfaVerifiedAt: userSessions.mfaVerifiedAt,
+          lastSeenAt: userSessions.lastSeenAt,
+          expiresAt: userSessions.expiresAt,
+          revokedAt: userSessions.revokedAt,
+          createdAt: userSessions.createdAt,
+        })
+        .from(userSessions)
+        .where(eq(userSessions.userId, req.authUser!.userId))
+        .orderBy(desc(userSessions.lastSeenAt))
+    );
+    res.json({
+      sessions: list.map((s) => ({ ...s, isCurrent: s.id === req.authUser!.sessionId })),
+    });
+  } catch (err) {
+    console.error('List sessions error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to load active sessions.',
+    });
+  }
 });
 
 authRouter.delete('/sessions/:sessionId', requireAuth, async (req: AuthRequest, res) => {
-  await db
-    .update(userSessions)
-    .set({ revokedAt: new Date() })
-    .where(
-      and(
-        eq(userSessions.id, String(req.params.sessionId)),
-        eq(userSessions.userId, req.authUser!.userId)
-      )
+  try {
+    await withDbRetry(() =>
+      db
+        .update(userSessions)
+        .set({ revokedAt: new Date() })
+        .where(
+          and(
+            eq(userSessions.id, String(req.params.sessionId)),
+            eq(userSessions.userId, req.authUser!.userId)
+          )
+        )
     );
-  res.json({ revoked: true });
+    res.json({ revoked: true });
+  } catch (err) {
+    console.error('Revoke session error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to revoke session right now.',
+    });
+  }
 });
 
 // Secure Server-Side First Super Admin Provisioning (Requires SUPER_ADMIN_PROVISION_SECRET, zero hardcoded credentials)

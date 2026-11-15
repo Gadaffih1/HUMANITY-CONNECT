@@ -73,9 +73,10 @@ function buildPoolConfig(): PoolConfig {
     return {
       connectionString,
       ...(requiresSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-      max: 10,
+      max: 15,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 20000,
+      statement_timeout: 25000,
     };
   }
 
@@ -93,9 +94,10 @@ function buildPoolConfig(): PoolConfig {
     password,
     database,
     ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-    max: 10,
+    max: 15,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 20000,
+    statement_timeout: 25000,
   };
 }
 

@@ -26,6 +26,10 @@ import {
 import { encryptSensitiveText, hashPassword, verifyPassword } from '../lib/crypto.ts';
 import { STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
 import { ensureStaffEstablishmentDirectoryReady } from './staffEstablishmentSchema.ts';
+import {
+  ensureGovernanceSettingsSchemaReady,
+  ensureRegistrationSchemaReady,
+} from './registrationSchema.ts';
 
 let seedPromise: Promise<void> | null = null;
 
@@ -307,7 +311,7 @@ export async function ensureSeededSuperAdmin(): Promise<void> {
 }
 
 async function runSeed(): Promise<void> {
-  // Fast-path check: skip 180+ redundant seed round-trips when reference data is already seeded
+  // Fast-path check: guard every count with to_regclass so partially migrated external DBs never throw 42P01
   const fastCheck = await withDbRetry(
     () =>
       pool.query<{
@@ -325,14 +329,14 @@ async function runSeed(): Promise<void> {
         has_staff_depts: boolean;
       }>(`
         SELECT
-          (SELECT count(*)::int FROM roles) AS roles_count,
-          (SELECT count(*)::int FROM permissions) AS perms_count,
-          (SELECT count(*)::int FROM needs_categories) AS cats_count,
-          COALESCE((SELECT count(*)::int FROM staff_departments), 0) AS staff_dept_count,
-          (SELECT count(*)::int FROM staff_positions) AS staff_count,
-          (SELECT count(*)::int FROM staff_vacancies) AS vacancies_count,
-          (SELECT count(*)::int FROM data_retention_policies) AS policies_count,
-          (SELECT count(*)::int FROM platform_settings) AS settings_count,
+          CASE WHEN to_regclass('public.roles') IS NOT NULL THEN (SELECT count(*)::int FROM public.roles) ELSE 0 END AS roles_count,
+          CASE WHEN to_regclass('public.permissions') IS NOT NULL THEN (SELECT count(*)::int FROM public.permissions) ELSE 0 END AS perms_count,
+          CASE WHEN to_regclass('public.needs_categories') IS NOT NULL THEN (SELECT count(*)::int FROM public.needs_categories) ELSE 0 END AS cats_count,
+          CASE WHEN to_regclass('public.staff_departments') IS NOT NULL THEN (SELECT count(*)::int FROM public.staff_departments) ELSE 0 END AS staff_dept_count,
+          CASE WHEN to_regclass('public.staff_positions') IS NOT NULL THEN (SELECT count(*)::int FROM public.staff_positions) ELSE 0 END AS staff_count,
+          CASE WHEN to_regclass('public.staff_vacancies') IS NOT NULL THEN (SELECT count(*)::int FROM public.staff_vacancies) ELSE 0 END AS vacancies_count,
+          CASE WHEN to_regclass('public.data_retention_policies') IS NOT NULL THEN (SELECT count(*)::int FROM public.data_retention_policies) ELSE 0 END AS policies_count,
+          CASE WHEN to_regclass('public.platform_settings') IS NOT NULL THEN (SELECT count(*)::int FROM public.platform_settings) ELSE 0 END AS settings_count,
           (to_regclass('public.user_sessions') IS NOT NULL) AS has_sessions,
           (to_regclass('public.user_permissions') IS NOT NULL) AS has_user_perms,
           (to_regclass('public.staff_departments') IS NOT NULL) AS has_staff_depts,
@@ -352,6 +356,9 @@ async function runSeed(): Promise<void> {
   ) {
     await ensureCoreAuthSchema().catch((schemaErr) => {
       console.warn('Core auth schema check warning:', schemaErr);
+    });
+    await ensureRegistrationSchemaReady().catch((regSchemaErr) => {
+      console.warn('Registration schema check warning:', regSchemaErr);
     });
   }
 
@@ -1163,6 +1170,7 @@ async function ensureStudioVacanciesAndGovernanceSettingsSeeded(): Promise<void>
 
   // 8. Database-Persisted Data Retention Policies & Restricted Cross-Browser Settings (Never Overwrites Existing)
   try {
+    await ensureGovernanceSettingsSchemaReady();
     await db
       .insert(dataRetentionPolicies)
       .values([

@@ -25,7 +25,7 @@ const REGISTERABLE_ROLES: RoleCode[] = [
 export const AuthScreens: React.FC<{
   initialMode?: 'login' | 'register' | 'reset';
   presetRole?: string;
-  onSuccess: () => void;
+  onSuccess: (bannerMessage?: string) => void;
   onOpenSuperAdmin?: () => void;
 }> = ({ initialMode = 'login', presetRole = 'SUPPORTIVE', onSuccess, onOpenSuperAdmin }) => {
   const { loginWithPassword, registerAccount, apiFetch } = useAuth();
@@ -120,8 +120,16 @@ export const AuthScreens: React.FC<{
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedPhone = phoneE164.trim();
 
+    if (!trimmedName || !trimmedEmail || !trimmedPhone || !password) {
+      setFeedback({ type: 'error', text: 'Please complete all required fields.' });
+      return;
+    }
     if (trimmedName.length < 2) {
       setFeedback({ type: 'error', text: 'Please enter your full name (at least 2 characters).' });
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setFeedback({ type: 'error', text: 'Please enter a valid email address.' });
       return;
     }
     const phoneCheck = normalizeKenyanMsisdn(trimmedPhone);
@@ -148,7 +156,7 @@ export const AuthScreens: React.FC<{
 
     setBusy(true);
     try {
-      await registerAccount({
+      const result = await registerAccount({
         email: trimmedEmail,
         password,
         fullName: trimmedName,
@@ -174,9 +182,14 @@ export const AuthScreens: React.FC<{
           ? { vulnerabilitySummary: vulnerabilitySummary.trim() || undefined }
           : {}),
       });
-      onSuccess();
+      const successMsg = result?.message || 'Registration successful.';
+      setFeedback({ type: 'success', text: successMsg });
+      onSuccess(successMsg);
     } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message || 'Registration failed.' });
+      setFeedback({
+        type: 'error',
+        text: err.message || 'Registration temporarily unavailable. Please try again later.',
+      });
     } finally {
       setBusy(false);
     }
@@ -370,7 +383,7 @@ export const AuthScreens: React.FC<{
           )}
 
           {mode === 'register' && (
-            <form onSubmit={handleRegisterSubmit} className="space-y-5">
+            <form onSubmit={handleRegisterSubmit} noValidate className="space-y-5">
               <div className="space-y-2">
                 <label className="block text-xs font-semibold text-[#102E36]">
                   Select Account Category (One Category Only)

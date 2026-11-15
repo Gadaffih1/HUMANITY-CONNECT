@@ -12,7 +12,7 @@ interface AuthContextValue {
   apiFetch: <T = unknown>(url: string, options?: RequestInit) => Promise<T>;
   signInWithGoogle: () => Promise<void>;
   loginWithPassword: (email: string, password: string) => Promise<{ mfaChallengeRequired?: boolean }>;
-  registerAccount: (payload: Record<string, unknown>) => Promise<void>;
+  registerAccount: (payload: Record<string, unknown>) => Promise<{ message?: string }>;
   switchRole: (role: RoleCode) => Promise<void>;
   refreshUser: () => Promise<void>;
   logout: () => Promise<void>;
@@ -41,8 +41,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       const res = await fetch(url, { ...options, headers, credentials: 'include' });
-      const data = await res.json().catch(() => ({}));
+      const rawText = await res.text().catch(() => '');
+      let data: Record<string, any> = {};
+      if (rawText) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = {};
+        }
+      }
       if (!res.ok) {
+        if (res.status >= 502 && res.status <= 504 && !data.error) {
+          throw new Error(
+            `Service gateway temporarily unavailable (${res.status}). Please retry in a moment.`
+          );
+        }
         throw new Error(data.error || `Request failed (${res.status})`);
       }
       return data as T;
@@ -119,7 +132,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const registerAccount = async (payload: Record<string, unknown>) => {
     setError(null);
-    const data = await apiFetchWithToken<{ token: string; user: AuthUserSummary }>(
+    const data = await apiFetchWithToken<{
+      token: string;
+      user: AuthUserSummary;
+      message?: string;
+    }>(
       '/api/auth/register',
       null,
       {
@@ -129,6 +146,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     );
     setToken(data.token);
     setUser(data.user);
+    return { message: data.message };
   };
 
   const switchRole = async (role: RoleCode) => {

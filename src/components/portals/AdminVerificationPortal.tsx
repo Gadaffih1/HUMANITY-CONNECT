@@ -195,24 +195,8 @@ export const AdminVerificationPortal: React.FC = () => {
     setErrorMsg(null);
     try {
       const isSuperAdmin = Boolean(user?.roles.includes('SUPER_ADMIN'));
-      const [ov, rep, guide, emp, proj, comm, ts, dir] = await Promise.all([
-        apiFetch<any>('/api/admin/overview'),
-        apiFetch<any>('/api/payments/reports/monthly'),
-        apiFetch<any>('/api/payments/integration-guide'),
-        apiFetch<any>('/api/operations/empowerment'),
-        apiFetch<any>('/api/operations/projects'),
-        apiFetch<any>('/api/communications/centre'),
-        apiFetch<any>('/api/communications/talksasa/logs').catch(() => null),
-        isSuperAdmin ? apiFetch<any>('/api/admin/users-directory').catch(() => null) : Promise.resolve(null),
-      ]);
+      const ov = await apiFetch<any>('/api/admin/overview');
       setAdminData(ov);
-      setMonthlyReport(rep);
-      setDarajaGuide(guide);
-      setEmpowerment(emp);
-      setProjectsData(proj);
-      setCommCentre(comm);
-      setTalksasaData(ts);
-      if (dir) setUsersDirectory(dir);
 
       if (ov.verificationCases?.[0] && !selectedCaseId) {
         setSelectedCaseId(ov.verificationCases[0].id);
@@ -224,6 +208,23 @@ export const AdminVerificationPortal: React.FC = () => {
       if (ov.funds?.[0] && !disbFundId) {
         setDisbFundId(ov.funds[0].id);
       }
+
+      const [rep, guide, emp, proj, comm, ts, dir] = await Promise.all([
+        apiFetch<any>('/api/payments/reports/monthly').catch(() => null),
+        apiFetch<any>('/api/payments/integration-guide').catch(() => null),
+        apiFetch<any>('/api/operations/empowerment').catch(() => null),
+        apiFetch<any>('/api/operations/projects').catch(() => null),
+        apiFetch<any>('/api/communications/centre').catch(() => null),
+        apiFetch<any>('/api/communications/talksasa/logs').catch(() => null),
+        isSuperAdmin ? apiFetch<any>('/api/admin/users-directory').catch(() => null) : Promise.resolve(null),
+      ]);
+      if (rep) setMonthlyReport(rep);
+      if (guide) setDarajaGuide(guide);
+      if (emp) setEmpowerment(emp);
+      if (proj) setProjectsData(proj);
+      if (comm) setCommCentre(comm);
+      if (ts) setTalksasaData(ts);
+      if (dir) setUsersDirectory(dir);
 
       try {
         const dpia = await apiFetch<any>('/api/operations/safeguarding/dpia-inventory');
@@ -243,7 +244,7 @@ export const AdminVerificationPortal: React.FC = () => {
         // Privileged DPIA view requires verified MFA step-up
       }
     } catch (err: any) {
-      setErrorMsg(err.message);
+      setErrorMsg(err.message || 'Unable to load governance overview.');
     } finally {
       setLoading(false);
     }
@@ -378,8 +379,19 @@ export const AdminVerificationPortal: React.FC = () => {
         </div>
       )}
       {errorMsg && (
-        <div className="p-3.5 rounded-xl bg-[#9F2D20]/10 border border-[#9F2D20]/25 text-sm text-[#9F2D20]">
-          {errorMsg}
+        <div className="p-3.5 rounded-xl bg-[#9F2D20]/10 border border-[#9F2D20]/25 text-sm text-[#9F2D20] flex flex-wrap items-center justify-between gap-3">
+          <span>{errorMsg}</span>
+          <GlossyButton
+            size="sm"
+            variant="ivory"
+            onClick={() => {
+              setLoading(true);
+              loadAll();
+            }}
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Retry
+          </GlossyButton>
         </div>
       )}
 

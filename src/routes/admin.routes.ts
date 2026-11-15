@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { eq, desc, sql, inArray } from 'drizzle-orm';
-import { db, pool } from '../db/index.ts';
+import { db, isTransientDbError, pool, withDbRetry } from '../db/index.ts';
 import {
   users,
   roles,
@@ -64,136 +64,166 @@ adminRouter.get('/overview', async (req: AuthRequest, res) => {
       req.authUser!.permissions
     );
 
-    const [
-      cases,
-      needs,
-      funds,
-      allocations,
-      disbList,
-      incidents,
-      audits,
-      userList,
-      roleList,
-      assignments,
-      directPermRows,
-    ] = await Promise.all([
-      db
-        .select({
-          id: verificationCases.id,
-          caseNumber: verificationCases.caseNumber,
-          beneficiaryId: verificationCases.beneficiaryId,
-          beneficiaryRef: beneficiaryProfiles.referenceCode,
-          displayAlias: beneficiaryProfiles.displayAlias,
-          classification: beneficiaryProfiles.classification,
-          isMinorCase: beneficiaryProfiles.isMinorCase,
-          officerWorkspace: verificationCases.officerWorkspace,
-          verificationLevel: verificationCases.verificationLevel,
-          stage: verificationCases.stage,
-          fieldCounty: verificationCases.fieldCounty,
-          identityVerified: verificationCases.identityVerified,
-          guardianVerified: verificationCases.guardianVerified,
-          householdVerified: verificationCases.householdVerified,
-          needVerified: verificationCases.needVerified,
-          documentChecklistOk: verificationCases.documentChecklistOk,
-          fieldVisitVerified: verificationCases.fieldVisitVerified,
-          fieldVisitNotes: verificationCases.fieldVisitNotes,
-          institutionalConfirmationRef: verificationCases.institutionalConfirmationRef,
-          safeguardingCleared: verificationCases.safeguardingCleared,
-          duplicateAlertFlag: verificationCases.duplicateAlertFlag,
-          duplicateAlertDetails: verificationCases.duplicateAlertDetails,
-          caseDeadlineAt: verificationCases.caseDeadlineAt,
-          followUpReminderAt: verificationCases.followUpReminderAt,
-          appealStatus: verificationCases.appealStatus,
-          appealReason: verificationCases.appealReason,
-          decisionNotes: verificationCases.decisionNotes,
-          updatedAt: verificationCases.updatedAt,
-        })
-        .from(verificationCases)
-        .innerJoin(beneficiaryProfiles, eq(verificationCases.beneficiaryId, beneficiaryProfiles.id))
-        .orderBy(desc(verificationCases.updatedAt)),
-      db
-        .select({
-          id: needRequests.id,
-          referenceCode: needRequests.referenceCode,
-          beneficiaryId: needRequests.beneficiaryId,
-          beneficiaryAlias: beneficiaryProfiles.displayAlias,
-          categoryName: needsCategories.name,
-          categoryCode: needsCategories.code,
-          title: needRequests.title,
-          description: needRequests.description,
-          supportingEvidenceNotes: needRequests.supportingEvidenceNotes,
-          targetAmountMinor: needRequests.targetAmountMinor,
-          approvedAmountMinor: needRequests.approvedAmountMinor,
-          fulfilledAmountMinor: needRequests.fulfilledAmountMinor,
-          currency: needRequests.currency,
-          deadlineAt: needRequests.deadlineAt,
-          isRecurring: needRequests.isRecurring,
-          frequency: needRequests.frequency,
-          durationMonths: needRequests.durationMonths,
-          priorityTier: needRequests.priorityTier,
-          verificationStatus: needRequests.verificationStatus,
-          status: needRequests.status,
-          compositePriority: priorityAssessments.compositePriority,
-          assessmentReasons: priorityAssessments.assessmentReasons,
-          rationale: priorityAssessments.rationale,
-          humanApproved: priorityAssessments.humanApproved,
-        })
-        .from(needRequests)
-        .innerJoin(beneficiaryProfiles, eq(needRequests.beneficiaryId, beneficiaryProfiles.id))
-        .innerJoin(needsCategories, eq(needRequests.categoryId, needsCategories.id))
-        .leftJoin(priorityAssessments, eq(priorityAssessments.needRequestId, needRequests.id))
-        .orderBy(desc(needRequests.createdAt)),
-      db.select().from(humanitarianFunds),
-      db.select().from(fundAllocations).orderBy(desc(fundAllocations.createdAt)),
-      db.select().from(disbursements).orderBy(desc(disbursements.createdAt)),
-      canSeeSafeguarding
-        ? db.select().from(safeguardingIncidents).orderBy(desc(safeguardingIncidents.createdAt))
-        : Promise.resolve([]),
-      db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(80),
-      db
-        .select({
-          id: users.id,
-          email: users.email,
-          fullName: users.fullName,
-          phoneE164: users.phoneE164,
-          countryCode: users.countryCode,
-          county: sql<string | null>`COALESCE(
-            NULLIF(${users.county}, ''),
-            (SELECT county FROM public.beneficiary_profiles WHERE user_id = ${users.id} LIMIT 1),
-            (SELECT county_assignment FROM public.staff_employee_profiles WHERE user_id = ${users.id} LIMIT 1),
-            (SELECT county FROM public.field_geography_officers WHERE user_id = ${users.id} LIMIT 1)
-          )`,
-          subCounty: sql<string | null>`COALESCE(
-            NULLIF(${users.subCounty}, ''),
-            (SELECT sub_county FROM public.beneficiary_profiles WHERE user_id = ${users.id} LIMIT 1),
-            (SELECT sub_county_assignment FROM public.staff_employee_profiles WHERE user_id = ${users.id} LIMIT 1),
-            (SELECT sub_county FROM public.field_geography_officers WHERE user_id = ${users.id} LIMIT 1)
-          )`,
-          mfaEnabled: users.mfaEnabled,
-          approvalStatus: users.approvalStatus,
-          createdAt: users.createdAt,
-        })
-        .from(users)
-        .orderBy(desc(users.createdAt))
-        .limit(100),
-      db.select().from(roles),
-      db.select().from(volunteerAssignments).orderBy(desc(volunteerAssignments.createdAt)),
-      db.select().from(userPermissions),
-    ]);
+    const schemaProbe = await withDbRetry(() =>
+      pool.query<{
+        has_sep: boolean;
+        has_fgo: boolean;
+        has_up: boolean;
+        has_vce: boolean;
+        has_va: boolean;
+      }>(`
+        SELECT
+          (to_regclass('public.staff_employee_profiles') IS NOT NULL) AS has_sep,
+          (to_regclass('public.field_geography_officers') IS NOT NULL) AS has_fgo,
+          (to_regclass('public.user_permissions') IS NOT NULL) AS has_up,
+          (to_regclass('public.verification_case_events') IS NOT NULL) AS has_vce,
+          (to_regclass('public.volunteer_assignments') IS NOT NULL) AS has_va
+      `)
+    ).catch(() => ({
+      rows: [{ has_sep: false, has_fgo: false, has_up: false, has_vce: false, has_va: false }],
+    }));
+    const flags = schemaProbe.rows[0] || {
+      has_sep: false,
+      has_fgo: false,
+      has_up: false,
+      has_vce: false,
+      has_va: false,
+    };
 
-    const userRoleLinks = await db
-      .select({
-        userId: userRoles.userId,
-        roleCode: roles.code,
-      })
-      .from(userRoles)
-      .innerJoin(roles, eq(userRoles.roleId, roles.id));
+    const countySqlExpr = sql<string | null>`COALESCE(
+      NULLIF(${users.county}, ''),
+      (SELECT county FROM public.beneficiary_profiles WHERE user_id = ${users.id} LIMIT 1)
+      ${flags.has_sep ? sql`, (SELECT county_assignment FROM public.staff_employee_profiles WHERE user_id = ${users.id} LIMIT 1)` : sql``}
+      ${flags.has_fgo ? sql`, (SELECT county FROM public.field_geography_officers WHERE user_id = ${users.id} LIMIT 1)` : sql``}
+    )`;
 
-    const caseEvents = await db
-      .select()
-      .from(verificationCaseEvents)
-      .orderBy(desc(verificationCaseEvents.createdAt))
-      .limit(100);
+    const subCountySqlExpr = sql<string | null>`COALESCE(
+      NULLIF(${users.subCounty}, ''),
+      (SELECT sub_county FROM public.beneficiary_profiles WHERE user_id = ${users.id} LIMIT 1)
+      ${flags.has_sep ? sql`, (SELECT sub_county_assignment FROM public.staff_employee_profiles WHERE user_id = ${users.id} LIMIT 1)` : sql``}
+      ${flags.has_fgo ? sql`, (SELECT sub_county FROM public.field_geography_officers WHERE user_id = ${users.id} LIMIT 1)` : sql``}
+    )`;
+
+    // Batch 1: Core verification queue, needs, funds, and allocations
+    const [cases, needs, funds, allocations, disbList, incidents] = await withDbRetry(() =>
+      Promise.all([
+        db
+          .select({
+            id: verificationCases.id,
+            caseNumber: verificationCases.caseNumber,
+            beneficiaryId: verificationCases.beneficiaryId,
+            beneficiaryRef: beneficiaryProfiles.referenceCode,
+            displayAlias: beneficiaryProfiles.displayAlias,
+            classification: beneficiaryProfiles.classification,
+            isMinorCase: beneficiaryProfiles.isMinorCase,
+            officerWorkspace: verificationCases.officerWorkspace,
+            verificationLevel: verificationCases.verificationLevel,
+            stage: verificationCases.stage,
+            fieldCounty: verificationCases.fieldCounty,
+            identityVerified: verificationCases.identityVerified,
+            guardianVerified: verificationCases.guardianVerified,
+            householdVerified: verificationCases.householdVerified,
+            needVerified: verificationCases.needVerified,
+            documentChecklistOk: verificationCases.documentChecklistOk,
+            fieldVisitVerified: verificationCases.fieldVisitVerified,
+            fieldVisitNotes: verificationCases.fieldVisitNotes,
+            institutionalConfirmationRef: verificationCases.institutionalConfirmationRef,
+            safeguardingCleared: verificationCases.safeguardingCleared,
+            duplicateAlertFlag: verificationCases.duplicateAlertFlag,
+            duplicateAlertDetails: verificationCases.duplicateAlertDetails,
+            caseDeadlineAt: verificationCases.caseDeadlineAt,
+            followUpReminderAt: verificationCases.followUpReminderAt,
+            appealStatus: verificationCases.appealStatus,
+            appealReason: verificationCases.appealReason,
+            decisionNotes: verificationCases.decisionNotes,
+            updatedAt: verificationCases.updatedAt,
+          })
+          .from(verificationCases)
+          .innerJoin(beneficiaryProfiles, eq(verificationCases.beneficiaryId, beneficiaryProfiles.id))
+          .orderBy(desc(verificationCases.updatedAt)),
+        db
+          .select({
+            id: needRequests.id,
+            referenceCode: needRequests.referenceCode,
+            beneficiaryId: needRequests.beneficiaryId,
+            beneficiaryAlias: beneficiaryProfiles.displayAlias,
+            categoryName: needsCategories.name,
+            categoryCode: needsCategories.code,
+            title: needRequests.title,
+            description: needRequests.description,
+            supportingEvidenceNotes: needRequests.supportingEvidenceNotes,
+            targetAmountMinor: needRequests.targetAmountMinor,
+            approvedAmountMinor: needRequests.approvedAmountMinor,
+            fulfilledAmountMinor: needRequests.fulfilledAmountMinor,
+            currency: needRequests.currency,
+            deadlineAt: needRequests.deadlineAt,
+            isRecurring: needRequests.isRecurring,
+            frequency: needRequests.frequency,
+            durationMonths: needRequests.durationMonths,
+            priorityTier: needRequests.priorityTier,
+            verificationStatus: needRequests.verificationStatus,
+            status: needRequests.status,
+            compositePriority: priorityAssessments.compositePriority,
+            assessmentReasons: priorityAssessments.assessmentReasons,
+            rationale: priorityAssessments.rationale,
+            humanApproved: priorityAssessments.humanApproved,
+          })
+          .from(needRequests)
+          .innerJoin(beneficiaryProfiles, eq(needRequests.beneficiaryId, beneficiaryProfiles.id))
+          .innerJoin(needsCategories, eq(needRequests.categoryId, needsCategories.id))
+          .leftJoin(priorityAssessments, eq(priorityAssessments.needRequestId, needRequests.id))
+          .orderBy(desc(needRequests.createdAt)),
+        db.select().from(humanitarianFunds),
+        db.select().from(fundAllocations).orderBy(desc(fundAllocations.createdAt)),
+        db.select().from(disbursements).orderBy(desc(disbursements.createdAt)),
+        canSeeSafeguarding
+          ? db.select().from(safeguardingIncidents).orderBy(desc(safeguardingIncidents.createdAt))
+          : Promise.resolve([]),
+      ])
+    );
+
+    // Batch 2: Audit logs, users/roles/permissions, volunteer assignments, case events
+    const [audits, userList, roleList, assignments, directPermRows, userRoleLinks, caseEvents] =
+      await withDbRetry(() =>
+        Promise.all([
+          db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(80),
+          db
+            .select({
+              id: users.id,
+              email: users.email,
+              fullName: users.fullName,
+              phoneE164: users.phoneE164,
+              countryCode: users.countryCode,
+              county: countySqlExpr,
+              subCounty: subCountySqlExpr,
+              mfaEnabled: users.mfaEnabled,
+              approvalStatus: users.approvalStatus,
+              createdAt: users.createdAt,
+            })
+            .from(users)
+            .orderBy(desc(users.createdAt))
+            .limit(100),
+          db.select().from(roles),
+          flags.has_va
+            ? db.select().from(volunteerAssignments).orderBy(desc(volunteerAssignments.createdAt))
+            : Promise.resolve([]),
+          flags.has_up ? db.select().from(userPermissions) : Promise.resolve([]),
+          db
+            .select({
+              userId: userRoles.userId,
+              roleCode: roles.code,
+            })
+            .from(userRoles)
+            .innerJoin(roles, eq(userRoles.roleId, roles.id)),
+          flags.has_vce
+            ? db
+                .select()
+                .from(verificationCaseEvents)
+                .orderBy(desc(verificationCaseEvents.createdAt))
+                .limit(100)
+            : Promise.resolve([]),
+        ])
+      );
 
     const userLookup = new Map(userList.map((u) => [u.id, { fullName: u.fullName, email: u.email }]));
     const accessAuditActions = new Set([
@@ -252,7 +282,9 @@ adminRouter.get('/overview', async (req: AuthRequest, res) => {
     });
   } catch (err) {
     console.error('Admin overview error:', err);
-    res.status(500).json({ error: 'Unable to load governance overview.' });
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: 'Unable to load governance overview. Please retry shortly.',
+    });
   }
 });
 
@@ -262,93 +294,110 @@ adminRouter.get(
   requireRole('SUPER_ADMIN'),
   async (_req: AuthRequest, res) => {
     try {
-      const directoryRes = await pool.query<{
-        id: string;
-        full_name: string;
-        email: string;
-        phone_e164: string | null;
-        country_code: string;
-        county: string | null;
-        sub_county: string | null;
-        ward: string | null;
-        approval_status: string;
-        email_verified: boolean;
-        phone_verified: boolean;
-        mfa_enabled: boolean;
-        last_login_at: string | null;
-        created_at: string;
-        roles: string[] | null;
-        beneficiary_classification: string | null;
-        beneficiary_ref: string | null;
-      }>(`
-        SELECT
-          u.id,
-          u.full_name,
-          u.email,
-          u.phone_e164,
-          u.country_code,
-          COALESCE(NULLIF(u.county, ''), bp.county, sep.county_assignment, fgo.county) AS county,
-          COALESCE(NULLIF(u.sub_county, ''), bp.sub_county, sep.sub_county_assignment, fgo.sub_county) AS sub_county,
-          COALESCE(bp.ward, fgo.ward) AS ward,
-          u.approval_status,
-          (u.email_verified_at IS NOT NULL) AS email_verified,
-          (u.phone_verified_at IS NOT NULL) AS phone_verified,
-          u.mfa_enabled,
-          u.last_login_at,
-          u.created_at,
-          COALESCE(
-            ARRAY_AGG(DISTINCT r.code) FILTER (WHERE r.code IS NOT NULL),
-            ARRAY[]::text[]
-          ) AS roles,
-          bp.classification AS beneficiary_classification,
-          bp.reference_code AS beneficiary_ref
-        FROM public.users u
-        LEFT JOIN public.user_roles ur ON ur.user_id = u.id AND ur.status = 'ACTIVE'
-        LEFT JOIN public.roles r ON r.id = ur.role_id
-        LEFT JOIN LATERAL (
-          SELECT county, sub_county, ward, classification, reference_code
-          FROM public.beneficiary_profiles
-          WHERE user_id = u.id
-          LIMIT 1
-        ) bp ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT county_assignment, sub_county_assignment
-          FROM public.staff_employee_profiles
-          WHERE user_id = u.id
-          LIMIT 1
-        ) sep ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT county, sub_county, ward
-          FROM public.field_geography_officers
-          WHERE user_id = u.id
-          LIMIT 1
-        ) fgo ON TRUE
-        GROUP BY
-          u.id,
-          u.full_name,
-          u.email,
-          u.phone_e164,
-          u.country_code,
-          u.county,
-          u.sub_county,
-          u.approval_status,
-          u.email_verified_at,
-          u.phone_verified_at,
-          u.mfa_enabled,
-          u.last_login_at,
-          u.created_at,
-          bp.county,
-          bp.sub_county,
-          bp.ward,
-          bp.classification,
-          bp.reference_code,
-          sep.county_assignment,
-          sep.sub_county_assignment,
-          fgo.county,
-          fgo.sub_county,
-          fgo.ward
-        ORDER BY u.created_at DESC;
-      `);
+      const regProbe = await withDbRetry(() =>
+        pool.query<{ has_sep: boolean; has_fgo: boolean }>(`
+          SELECT
+            (to_regclass('public.staff_employee_profiles') IS NOT NULL) AS has_sep,
+            (to_regclass('public.field_geography_officers') IS NOT NULL) AS has_fgo
+        `)
+      ).catch(() => ({ rows: [{ has_sep: false, has_fgo: false }] }));
+      const hasSep = Boolean(regProbe.rows[0]?.has_sep);
+      const hasFgo = Boolean(regProbe.rows[0]?.has_fgo);
+
+      const directoryRes = await withDbRetry(() =>
+        pool.query<{
+          id: string;
+          full_name: string;
+          email: string;
+          phone_e164: string | null;
+          country_code: string;
+          county: string | null;
+          sub_county: string | null;
+          ward: string | null;
+          approval_status: string;
+          email_verified: boolean;
+          phone_verified: boolean;
+          mfa_enabled: boolean;
+          last_login_at: string | null;
+          created_at: string;
+          roles: string[] | null;
+          beneficiary_classification: string | null;
+          beneficiary_ref: string | null;
+        }>(`
+          SELECT
+            u.id,
+            u.full_name,
+            u.email,
+            u.phone_e164,
+            u.country_code,
+            COALESCE(NULLIF(u.county, ''), bp.county ${hasSep ? ', sep.county_assignment' : ''} ${hasFgo ? ', fgo.county' : ''}) AS county,
+            COALESCE(NULLIF(u.sub_county, ''), bp.sub_county ${hasSep ? ', sep.sub_county_assignment' : ''} ${hasFgo ? ', fgo.sub_county' : ''}) AS sub_county,
+            COALESCE(bp.ward ${hasFgo ? ', fgo.ward' : ''}) AS ward,
+            u.approval_status,
+            (u.email_verified_at IS NOT NULL) AS email_verified,
+            (u.phone_verified_at IS NOT NULL) AS phone_verified,
+            u.mfa_enabled,
+            u.last_login_at,
+            u.created_at,
+            COALESCE(
+              ARRAY_AGG(DISTINCT r.code) FILTER (WHERE r.code IS NOT NULL),
+              ARRAY[]::text[]
+            ) AS roles,
+            bp.classification AS beneficiary_classification,
+            bp.reference_code AS beneficiary_ref
+          FROM public.users u
+          LEFT JOIN public.user_roles ur ON ur.user_id = u.id AND ur.status = 'ACTIVE'
+          LEFT JOIN public.roles r ON r.id = ur.role_id
+          LEFT JOIN LATERAL (
+            SELECT county, sub_county, ward, classification, reference_code
+            FROM public.beneficiary_profiles
+            WHERE user_id = u.id
+            LIMIT 1
+          ) bp ON TRUE
+          ${
+            hasSep
+              ? `LEFT JOIN LATERAL (
+                  SELECT county_assignment, sub_county_assignment
+                  FROM public.staff_employee_profiles
+                  WHERE user_id = u.id
+                  LIMIT 1
+                ) sep ON TRUE`
+              : ''
+          }
+          ${
+            hasFgo
+              ? `LEFT JOIN LATERAL (
+                  SELECT county, sub_county, ward
+                  FROM public.field_geography_officers
+                  WHERE user_id = u.id
+                  LIMIT 1
+                ) fgo ON TRUE`
+              : ''
+          }
+          GROUP BY
+            u.id,
+            u.full_name,
+            u.email,
+            u.phone_e164,
+            u.country_code,
+            u.county,
+            u.sub_county,
+            u.approval_status,
+            u.email_verified_at,
+            u.phone_verified_at,
+            u.mfa_enabled,
+            u.last_login_at,
+            u.created_at,
+            bp.county,
+            bp.sub_county,
+            bp.ward,
+            bp.classification,
+            bp.reference_code
+            ${hasSep ? ', sep.county_assignment, sep.sub_county_assignment' : ''}
+            ${hasFgo ? ', fgo.county, fgo.sub_county, fgo.ward' : ''}
+          ORDER BY u.created_at DESC;
+        `)
+      );
 
       const directoryUsers = directoryRes.rows.map((row) => ({
         id: row.id,
@@ -376,7 +425,7 @@ adminRouter.get(
       });
     } catch (err) {
       console.error('Super Admin users directory error:', err);
-      res.status(500).json({ error: 'Unable to load registered users directory.' });
+      res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to load registered users directory.' });
     }
   }
 );
@@ -760,81 +809,92 @@ adminRouter.post('/finance/disburse', requirePrivilegedMfa, async (req: AuthRequ
 });
 
 adminRouter.post('/safeguarding', requirePrivilegedMfa, async (req: AuthRequest, res) => {
-  if (isReadOnlyAuditor(req)) {
-    return res.status(403).json({
-      error: 'Auditor independence enforced: Auditors cannot alter safeguarding incident statuses.',
-    });
-  }
-  if (!userCanViewSafeguardingCases(req.authUser!.roles, req.authUser!.permissions)) {
-    return res.status(403).json({
-      error: 'Rule #7 Safeguarding Confidentiality: HR and non-safeguarding roles cannot access or modify protected safeguarding investigations.',
-    });
-  }
-
-  const { incidentId, status, resolutionNotes, beneficiaryId, category, severity, summary } =
-    req.body as {
-      incidentId?: string;
-      status?: string;
-      resolutionNotes?: string;
-      beneficiaryId?: string;
-      category?: string;
-      severity?: string;
-      summary?: string;
-    };
-
-  if (incidentId && status) {
-    const [existing] = await db
-      .select()
-      .from(safeguardingIncidents)
-      .where(eq(safeguardingIncidents.id, incidentId))
-      .limit(1);
-    if (!existing) return res.status(404).json({ error: 'Safeguarding incident not found.' });
-
-    // Anti-self-approval: reporting officer cannot unilaterally close/resolve own case
-    if (status === 'RESOLVED' && existing.reportedByUserId === req.authUser!.userId) {
+  try {
+    if (isReadOnlyAuditor(req)) {
       return res.status(403).json({
-        error: 'Independent safeguarding oversight enforced: you cannot unilaterally resolve a safeguarding incident you reported.',
+        error: 'Auditor independence enforced: Auditors cannot alter safeguarding incident statuses.',
+      });
+    }
+    if (!userCanViewSafeguardingCases(req.authUser!.roles, req.authUser!.permissions)) {
+      return res.status(403).json({
+        error: 'Rule #7 Safeguarding Confidentiality: HR and non-safeguarding roles cannot access or modify protected safeguarding investigations.',
       });
     }
 
-    const [updated] = await db
-      .update(safeguardingIncidents)
-      .set({
-        status,
-        resolutionNotes: resolutionNotes || null,
-        assignedAdminId: req.authUser!.userId,
-        resolvedAt: status === 'RESOLVED' ? new Date() : null,
-      })
-      .where(eq(safeguardingIncidents.id, incidentId))
-      .returning();
+    const { incidentId, status, resolutionNotes, beneficiaryId, category, severity, summary } =
+      req.body as {
+        incidentId?: string;
+        status?: string;
+        resolutionNotes?: string;
+        beneficiaryId?: string;
+        category?: string;
+        severity?: string;
+        summary?: string;
+      };
 
-    await writeAuditLog({
-      actorUserId: req.authUser!.userId,
-      actorRole: req.authUser!.activeRole,
-      action: 'SAFEGUARDING_INCIDENT_UPDATED',
-      entityType: 'safeguarding_incidents',
-      entityId: incidentId,
-      ip: req.ip,
-      details: { status },
-    });
+    if (incidentId && status) {
+      const [existing] = await withDbRetry(() =>
+        db
+          .select()
+          .from(safeguardingIncidents)
+          .where(eq(safeguardingIncidents.id, incidentId))
+          .limit(1)
+      );
+      if (!existing) return res.status(404).json({ error: 'Safeguarding incident not found.' });
 
-    return res.json({ incident: updated });
+      // Anti-self-approval: reporting officer cannot unilaterally close/resolve own case
+      if (status === 'RESOLVED' && existing.reportedByUserId === req.authUser!.userId) {
+        return res.status(403).json({
+          error: 'Independent safeguarding oversight enforced: you cannot unilaterally resolve a safeguarding incident you reported.',
+        });
+      }
+
+      const [updated] = await withDbRetry(() =>
+        db
+          .update(safeguardingIncidents)
+          .set({
+            status,
+            resolutionNotes: resolutionNotes || null,
+            assignedAdminId: req.authUser!.userId,
+            resolvedAt: status === 'RESOLVED' ? new Date() : null,
+          })
+          .where(eq(safeguardingIncidents.id, incidentId))
+          .returning()
+      );
+
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: 'SAFEGUARDING_INCIDENT_UPDATED',
+        entityType: 'safeguarding_incidents',
+        entityId: incidentId,
+        ip: req.ip,
+        details: { status },
+      });
+
+      return res.json({ incident: updated });
+    }
+
+    if (!summary) return res.status(400).json({ error: 'Incident summary required.' });
+    const [created] = await withDbRetry(() =>
+      db
+        .insert(safeguardingIncidents)
+        .values({
+          beneficiaryId: beneficiaryId || null,
+          reportedByUserId: req.authUser!.userId,
+          assignedAdminId: null,
+          severity: severity || 'HIGH',
+          category: category || 'CHILD_PROTECTION',
+          summaryEnc: encryptSensitiveText(summary),
+          status: 'OPEN',
+        })
+        .returning()
+    );
+    res.status(201).json({ incident: created });
+  } catch (err) {
+    console.error('Safeguarding action error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to process safeguarding incident.' });
   }
-
-  if (!summary) return res.status(400).json({ error: 'Incident summary required.' });
-  const [created] = await db
-    .insert(safeguardingIncidents)
-    .values({
-      beneficiaryId: beneficiaryId || null,
-      reportedByUserId: req.authUser!.userId,
-      assignedAdminId: null,
-      severity: severity || 'HIGH',
-      category: category || 'CHILD_PROTECTION',
-      summaryEnc: encryptSensitiveText(summary),
-      status: 'OPEN',
-    })
-    .returning();
-  res.status(201).json({ incident: created });
 });
 
 // Permission Mapping Preview (Before any role or permission change is committed)
@@ -1124,65 +1184,76 @@ adminRouter.post(
   requireRole('SUPER_ADMIN'),
   requirePrivilegedMfa,
   async (req: AuthRequest, res) => {
-    const userId = String(req.params.userId);
-    const { approvalStatus, suspensionReason, assignRoleCode } = req.body as {
-      approvalStatus?: string;
-      suspensionReason?: string;
-      assignRoleCode?: string;
-    };
+    try {
+      const userId = String(req.params.userId);
+      const { approvalStatus, suspensionReason, assignRoleCode } = req.body as {
+        approvalStatus?: string;
+        suspensionReason?: string;
+        assignRoleCode?: string;
+      };
 
-    if (userId === req.authUser!.userId && approvalStatus === 'SUSPENDED') {
-      return res.status(403).json({ error: 'Safety guard: an administrator cannot suspend their own account.' });
-    }
+      if (userId === req.authUser!.userId && approvalStatus === 'SUSPENDED') {
+        return res.status(403).json({ error: 'Safety guard: an administrator cannot suspend their own account.' });
+      }
 
-    if (assignRoleCode && ADMIN_ACCESS_ROLE_CODES.includes(assignRoleCode as RoleCode)) {
-      // Check Rule #10: Critical role assignments require permission mapping endpoint or justification
-      const preview = buildPermissionPreview({
-        existingRoles: [],
-        newRoleCode: assignRoleCode as RoleCode,
-        selectedFlags: [],
+      if (assignRoleCode && ADMIN_ACCESS_ROLE_CODES.includes(assignRoleCode as RoleCode)) {
+        // Check Rule #10: Critical role assignments require permission mapping endpoint or justification
+        const preview = buildPermissionPreview({
+          existingRoles: [],
+          newRoleCode: assignRoleCode as RoleCode,
+          selectedFlags: [],
+        });
+        if (preview.conflicts.length > 0) {
+          return res.status(400).json({ error: preview.conflicts.join(' ') });
+        }
+      }
+
+      if (approvalStatus) {
+        await withDbRetry(() =>
+          db
+            .update(users)
+            .set({
+              approvalStatus,
+              suspensionReason: approvalStatus === 'SUSPENDED' ? suspensionReason || 'Admin review' : null,
+            })
+            .where(eq(users.id, userId))
+        );
+      }
+
+      if (assignRoleCode) {
+        const [roleRow] = await withDbRetry(() =>
+          db.select().from(roles).where(eq(roles.code, assignRoleCode)).limit(1)
+        );
+        if (roleRow) {
+          await withDbRetry(() =>
+            db
+              .insert(userRoles)
+              .values({
+                userId,
+                roleId: roleRow.id,
+                assignedBy: req.authUser!.userId,
+                status: 'ACTIVE',
+              })
+              .onConflictDoNothing()
+          );
+        }
+      }
+
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: 'ADMIN_USER_GOVERNANCE_UPDATED',
+        entityType: 'users',
+        entityId: userId,
+        ip: req.ip,
+        details: { approvalStatus, assignRoleCode },
       });
-      if (preview.conflicts.length > 0) {
-        return res.status(400).json({ error: preview.conflicts.join(' ') });
-      }
+
+      res.json({ updated: true });
+    } catch (err) {
+      console.error('Admin user manage error:', err);
+      res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to update user account.' });
     }
-
-    if (approvalStatus) {
-      await db
-        .update(users)
-        .set({
-          approvalStatus,
-          suspensionReason: approvalStatus === 'SUSPENDED' ? suspensionReason || 'Admin review' : null,
-        })
-        .where(eq(users.id, userId));
-    }
-
-    if (assignRoleCode) {
-      const [roleRow] = await db.select().from(roles).where(eq(roles.code, assignRoleCode)).limit(1);
-      if (roleRow) {
-        await db
-          .insert(userRoles)
-          .values({
-            userId,
-            roleId: roleRow.id,
-            assignedBy: req.authUser!.userId,
-            status: 'ACTIVE',
-          })
-          .onConflictDoNothing();
-      }
-    }
-
-    await writeAuditLog({
-      actorUserId: req.authUser!.userId,
-      actorRole: req.authUser!.activeRole,
-      action: 'ADMIN_USER_GOVERNANCE_UPDATED',
-      entityType: 'users',
-      entityId: userId,
-      ip: req.ip,
-      details: { approvalStatus, assignRoleCode },
-    });
-
-    res.json({ updated: true });
   }
 );
 

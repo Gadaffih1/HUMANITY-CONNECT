@@ -2,7 +2,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { eq, and, desc, sql } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import {
   donations,
   paymentTransactions,
@@ -328,34 +328,48 @@ paymentsRouter.post('/mpesa/callback', async (req, res) => {
 
 // GET /api/payments/:id/status
 paymentsRouter.get('/:id/status', requireAuth, async (req: AuthRequest, res) => {
-  const [tx] = await db
-    .select()
-    .from(paymentTransactions)
-    .where(eq(paymentTransactions.id, String(req.params.id)))
-    .limit(1);
-  if (!tx) return res.status(404).json({ error: 'Payment transaction not found.' });
-  res.json({ transaction: tx });
+  try {
+    const [tx] = await withDbRetry(() =>
+      db
+        .select()
+        .from(paymentTransactions)
+        .where(eq(paymentTransactions.id, String(req.params.id)))
+        .limit(1)
+    );
+    if (!tx) return res.status(404).json({ error: 'Payment transaction not found.' });
+    res.json({ transaction: tx });
+  } catch (err) {
+    console.error('Payment status lookup error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to check payment status.' });
+  }
 });
 
 // POST /api/payments/mpesa/stk-query
 paymentsRouter.post('/mpesa/stk-query', requireAuth, async (req: AuthRequest, res) => {
-  const { checkoutRequestId } = req.body as { checkoutRequestId?: string };
-  if (!checkoutRequestId) return res.status(400).json({ error: 'checkoutRequestId is required.' });
+  try {
+    const { checkoutRequestId } = req.body as { checkoutRequestId?: string };
+    if (!checkoutRequestId) return res.status(400).json({ error: 'checkoutRequestId is required.' });
 
-  const [tx] = await db
-    .select()
-    .from(paymentTransactions)
-    .where(eq(paymentTransactions.checkoutRequestId, checkoutRequestId))
-    .limit(1);
-  if (!tx) return res.status(404).json({ error: 'Transaction not found.' });
+    const [tx] = await withDbRetry(() =>
+      db
+        .select()
+        .from(paymentTransactions)
+        .where(eq(paymentTransactions.checkoutRequestId, checkoutRequestId))
+        .limit(1)
+    );
+    if (!tx) return res.status(404).json({ error: 'Transaction not found.' });
 
-  res.json({
-    checkoutRequestId,
-    verificationStatus: tx.verificationStatus,
-    mpesaReceiptNumber: tx.mpesaReceiptNumber,
-    verifiedAt: tx.verifiedAt,
-    env: process.env.MPESA_ENV || 'unconfigured',
-  });
+    res.json({
+      checkoutRequestId,
+      verificationStatus: tx.verificationStatus,
+      mpesaReceiptNumber: tx.mpesaReceiptNumber,
+      verifiedAt: tx.verifiedAt,
+      env: process.env.MPESA_ENV || 'unconfigured',
+    });
+  } catch (err) {
+    console.error('STK query error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to query M-Pesa transaction status.' });
+  }
 });
 
 // Maker-Checker Financial Approval Queue (Disbursements, Refunds, Reversals)
@@ -365,26 +379,33 @@ paymentsRouter.post(
   requireRole('SUPER_ADMIN', 'FINANCE_OFFICER', 'FIELD_OFFICER'),
   requirePrivilegedMfa,
   async (req: AuthRequest, res) => {
-    const schema = z.object({
-      operationType: z.enum(['DISBURSEMENT', 'REFUND', 'REVERSAL', 'FUND_ALLOCATION']),
-      pathway: z.enum(['DIRECT_SPONSORSHIP', 'CENTRAL_FUND']),
-      targetEntityId: z.string().uuid(),
-      amountMinor: z.number().int().positive(),
-      reason: z.string().min(6),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: 'Invalid approval request.' });
+    try {
+      const schema = z.object({
+        operationType: z.enum(['DISBURSEMENT', 'REFUND', 'REVERSAL', 'FUND_ALLOCATION']),
+        pathway: z.enum(['DIRECT_SPONSORSHIP', 'CENTRAL_FUND']),
+        targetEntityId: z.string().uuid(),
+        amountMinor: z.number().int().positive(),
+        reason: z.string().min(6),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: 'Invalid approval request.' });
 
-    const [approval] = await db
-      .insert(financialApprovals)
-      .values({
-        ...parsed.data,
-        makerUserId: req.authUser!.userId,
-        status: 'PENDING_CHECKER',
-      })
-      .returning();
+      const [approval] = await withDbRetry(() =>
+        db
+          .insert(financialApprovals)
+          .values({
+            ...parsed.data,
+            makerUserId: req.authUser!.userId,
+            status: 'PENDING_CHECKER',
+          })
+          .returning()
+      );
 
-    res.status(201).json({ approval });
+      res.status(201).json({ approval });
+    } catch (err) {
+      console.error('Financial approval request error:', err);
+      res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to submit financial approval request.' });
+    }
   }
 );
 
@@ -394,41 +415,52 @@ paymentsRouter.post(
   requireRole('SUPER_ADMIN', 'FINANCE_OFFICER'),
   requirePrivilegedMfa,
   async (req: AuthRequest, res) => {
-    const { decision } = req.body as { decision?: 'APPROVED' | 'REJECTED' };
-    if (!decision) return res.status(400).json({ error: 'APPROVED or REJECTED required.' });
+    try {
+      const { decision } = req.body as { decision?: 'APPROVED' | 'REJECTED' };
+      if (!decision || !['APPROVED', 'REJECTED'].includes(decision)) {
+        return res.status(400).json({ error: 'APPROVED or REJECTED required.' });
+      }
 
-    const [approval] = await db
-      .select()
-      .from(financialApprovals)
-      .where(eq(financialApprovals.id, String(req.params.id)))
-      .limit(1);
-    if (!approval) return res.status(404).json({ error: 'Approval record not found.' });
-    if (approval.makerUserId === req.authUser!.userId) {
-      return res.status(403).json({
-        error: 'Maker-Checker separation enforced: the initiating officer cannot approve their own financial request.',
+      const [approval] = await withDbRetry(() =>
+        db
+          .select()
+          .from(financialApprovals)
+          .where(eq(financialApprovals.id, String(req.params.id)))
+          .limit(1)
+      );
+      if (!approval) return res.status(404).json({ error: 'Approval record not found.' });
+      if (approval.makerUserId === req.authUser!.userId) {
+        return res.status(403).json({
+          error: 'Maker-Checker separation enforced: the initiating officer cannot approve their own financial request.',
+        });
+      }
+
+      const [updated] = await withDbRetry(() =>
+        db
+          .update(financialApprovals)
+          .set({
+            checkerUserId: req.authUser!.userId,
+            status: decision,
+            decidedAt: new Date(),
+          })
+          .where(eq(financialApprovals.id, approval.id))
+          .returning()
+      );
+
+      await writeAuditLog({
+        actorUserId: req.authUser!.userId,
+        actorRole: req.authUser!.activeRole,
+        action: `FINANCIAL_MAKER_CHECKER_${decision}`,
+        entityType: 'financial_approvals',
+        entityId: approval.id,
+        ip: req.ip,
       });
+
+      res.json({ approval: updated });
+    } catch (err) {
+      console.error('Financial approval decision error:', err);
+      res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to record approval decision.' });
     }
-
-    const [updated] = await db
-      .update(financialApprovals)
-      .set({
-        checkerUserId: req.authUser!.userId,
-        status: decision,
-        decidedAt: new Date(),
-      })
-      .where(eq(financialApprovals.id, approval.id))
-      .returning();
-
-    await writeAuditLog({
-      actorUserId: req.authUser!.userId,
-      actorRole: req.authUser!.activeRole,
-      action: `FINANCIAL_MAKER_CHECKER_${decision}`,
-      entityType: 'financial_approvals',
-      entityId: approval.id,
-      ip: req.ip,
-    });
-
-    res.json({ approval: updated });
   }
 );
 
@@ -450,32 +482,44 @@ paymentsRouter.get(
     'WELL_WISHER'
   ),
   async (_req: AuthRequest, res) => {
-    const [journals, approvals, pledgesSummary, verifiedSummary, funds] = await Promise.all([
-      db.select().from(ledgerEntries).orderBy(desc(ledgerEntries.createdAt)).limit(100),
-      db.select().from(financialApprovals).orderBy(desc(financialApprovals.createdAt)).limit(30),
-      db
-        .select({
-          totalPledgedMinor: sql<number>`coalesce(sum(${donations.amountMinor}), 0)::int`,
-        })
-        .from(donations)
-        .where(eq(donations.status, 'PLEDGED')),
-      db
-        .select({
-          totalVerifiedMinor: sql<number>`coalesce(sum(${paymentTransactions.amountMinor}), 0)::int`,
-        })
-        .from(paymentTransactions)
-        .where(eq(paymentTransactions.verificationStatus, 'VERIFIED')),
-      db.select().from(humanitarianFunds),
-    ]);
+    try {
+      const [journals, approvals, pledgesSummary] = await withDbRetry(() =>
+        Promise.all([
+          db.select().from(ledgerEntries).orderBy(desc(ledgerEntries.createdAt)).limit(100),
+          db.select().from(financialApprovals).orderBy(desc(financialApprovals.createdAt)).limit(30),
+          db
+            .select({
+              totalPledgedMinor: sql<number>`coalesce(sum(${donations.amountMinor}), 0)::int`,
+            })
+            .from(donations)
+            .where(eq(donations.status, 'PLEDGED')),
+        ])
+      );
 
-    res.json({
-      generatedAt: new Date().toISOString(),
-      pledgedNotReceivedMinor: pledgesSummary[0]?.totalPledgedMinor ?? 0,
-      verifiedReceivedMinor: verifiedSummary[0]?.totalVerifiedMinor ?? 0,
-      funds,
-      journalEntries: journals,
-      makerCheckerApprovals: approvals,
-    });
+      const [verifiedSummary, funds] = await withDbRetry(() =>
+        Promise.all([
+          db
+            .select({
+              totalVerifiedMinor: sql<number>`coalesce(sum(${paymentTransactions.amountMinor}), 0)::int`,
+            })
+            .from(paymentTransactions)
+            .where(eq(paymentTransactions.verificationStatus, 'VERIFIED')),
+          db.select().from(humanitarianFunds),
+        ])
+      );
+
+      res.json({
+        generatedAt: new Date().toISOString(),
+        pledgedNotReceivedMinor: pledgesSummary[0]?.totalPledgedMinor ?? 0,
+        verifiedReceivedMinor: verifiedSummary[0]?.totalVerifiedMinor ?? 0,
+        funds,
+        journalEntries: journals,
+        makerCheckerApprovals: approvals,
+      });
+    } catch (err) {
+      console.error('Monthly financial report error:', err);
+      res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to generate monthly financial report.' });
+    }
   }
 );
 

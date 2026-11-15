@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { eq, desc } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import {
   notifications,
   beneficiaryProfiles,
@@ -59,83 +59,104 @@ export const NOTIFICATION_TEMPLATES = [
 ];
 
 communicationsRouter.get('/centre', async (req: AuthRequest, res) => {
-  const list = await db
-    .select()
-    .from(notifications)
-    .where(eq(notifications.userId, req.authUser!.userId))
-    .orderBy(desc(notifications.createdAt))
-    .limit(50);
+  try {
+    const list = await withDbRetry(() =>
+      db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.userId, req.authUser!.userId))
+        .orderBy(desc(notifications.createdAt))
+        .limit(50)
+    );
 
-  res.json({
-    templates: NOTIFICATION_TEMPLATES,
-    notifications: list,
-    safeguardingRule:
-      'Direct unsupervised messaging between adult supporters and minor beneficiaries is strictly blocked. Messages route through verified guardians or Safeguarding Officers.',
-  });
+    res.json({
+      templates: NOTIFICATION_TEMPLATES,
+      notifications: list,
+      safeguardingRule:
+        'Direct unsupervised messaging between adult supporters and minor beneficiaries is strictly blocked. Messages route through verified guardians or Safeguarding Officers.',
+    });
+  } catch (err) {
+    console.error('Communications centre load error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to load communications centre.' });
+  }
 });
 
 // Safe In-App Messaging with Minor Protection Enforcement
 communicationsRouter.post('/message', async (req: AuthRequest, res) => {
-  const schema = z.object({
-    recipientBeneficiaryId: z.string().uuid().optional(),
-    recipientUserId: z.string().uuid().optional(),
-    subject: z.string().min(2).max(140),
-    body: z.string().min(4).max(1500),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Valid subject and message required.' });
+  try {
+    const schema = z.object({
+      recipientBeneficiaryId: z.string().uuid().optional(),
+      recipientUserId: z.string().uuid().optional(),
+      subject: z.string().min(2).max(140),
+      body: z.string().min(4).max(1500),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Valid subject and message required.' });
 
-  const { recipientBeneficiaryId, recipientUserId, subject, body } = parsed.data;
-  let targetUserId = recipientUserId;
+    const { recipientBeneficiaryId, recipientUserId, subject, body } = parsed.data;
+    let targetUserId = recipientUserId;
 
-  if (recipientBeneficiaryId) {
-    const [bp] = await db
-      .select()
-      .from(beneficiaryProfiles)
-      .where(eq(beneficiaryProfiles.id, recipientBeneficiaryId))
-      .limit(1);
-    if (!bp) return res.status(404).json({ error: 'Beneficiary case not found.' });
+    if (recipientBeneficiaryId) {
+      const [bp] = await withDbRetry(() =>
+        db
+          .select()
+          .from(beneficiaryProfiles)
+          .where(eq(beneficiaryProfiles.id, recipientBeneficiaryId))
+          .limit(1)
+      );
+      if (!bp) return res.status(404).json({ error: 'Beneficiary case not found.' });
 
-    // Child Safeguarding Block: adult supporters cannot message minor cases directly
-    const isSupporter =
-      req.authUser!.activeRole === 'SUPPORTIVE' || req.authUser!.activeRole === 'WELL_WISHER';
-    if (bp.isMinorCase && isSupporter) {
-      await writeAuditLog({
-        actorUserId: req.authUser!.userId,
-        actorRole: req.authUser!.activeRole,
-        action: 'SAFEGUARDING_DIRECT_MINOR_MSG_BLOCKED',
-        entityType: 'beneficiary_profiles',
-        entityId: bp.id,
-        ip: req.ip,
-      });
-      return res.status(403).json({
-        error:
-          'Child Safeguarding Policy: Direct messaging to minor cases is disabled. Your message must be routed via the assigned Social Welfare / Safeguarding Officer.',
-      });
+      // Child Safeguarding Block: adult supporters cannot message minor cases directly
+      const isSupporter =
+        req.authUser!.activeRole === 'SUPPORTIVE' || req.authUser!.activeRole === 'WELL_WISHER';
+      if (bp.isMinorCase && isSupporter) {
+        await writeAuditLog({
+          actorUserId: req.authUser!.userId,
+          actorRole: req.authUser!.activeRole,
+          action: 'SAFEGUARDING_DIRECT_MINOR_MSG_BLOCKED',
+          entityType: 'beneficiary_profiles',
+          entityId: bp.id,
+          ip: req.ip,
+        });
+        return res.status(403).json({
+          error:
+            'Child Safeguarding Policy: Direct messaging to minor cases is disabled. Your message must be routed via the assigned Social Welfare / Safeguarding Officer.',
+        });
+      }
+      targetUserId = bp.userId;
     }
-    targetUserId = bp.userId;
+
+    let resolvedUserId: string;
+    if (!targetUserId) {
+      // Route to user's own inbox confirmation / support desk if no recipient specified
+      resolvedUserId = req.authUser!.userId;
+    } else {
+      const lookupUserId = targetUserId;
+      const [u] = await withDbRetry(() =>
+        db.select({ id: users.id }).from(users).where(eq(users.id, lookupUserId)).limit(1)
+      );
+      if (!u) return res.status(404).json({ error: 'Recipient not found.' });
+      resolvedUserId = lookupUserId;
+    }
+
+    const [msg] = await withDbRetry(() =>
+      db
+        .insert(notifications)
+        .values({
+          userId: resolvedUserId,
+          channel: 'IN_APP',
+          category: 'BENEFICIARY_UPDATE',
+          title: subject,
+          body,
+        })
+        .returning()
+    );
+
+    res.status(201).json({ message: msg });
+  } catch (err) {
+    console.error('Send communication message error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to send message.' });
   }
-
-  if (!targetUserId) {
-    // Route to user's own inbox confirmation / support desk if no recipient specified
-    targetUserId = req.authUser!.userId;
-  } else {
-    const [u] = await db.select({ id: users.id }).from(users).where(eq(users.id, targetUserId)).limit(1);
-    if (!u) return res.status(404).json({ error: 'Recipient not found.' });
-  }
-
-  const [msg] = await db
-    .insert(notifications)
-    .values({
-      userId: targetUserId,
-      channel: 'IN_APP',
-      category: 'BENEFICIARY_UPDATE',
-      title: subject,
-      body,
-    })
-    .returning();
-
-  res.status(201).json({ message: msg });
 });
 
 // TalkSasa SMS Gateway Logs, Status Summary & Retry (Strict Cloud SQL Persistence)

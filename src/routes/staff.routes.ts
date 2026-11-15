@@ -2,7 +2,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { eq, desc, and, sql, asc } from 'drizzle-orm';
-import { db, withDbRetry } from '../db/index.ts';
+import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import { ensureStaffEstablishmentDirectoryReady } from '../db/staffEstablishmentSchema.ts';
 import {
   staffDepartments,
@@ -624,15 +624,22 @@ staffRouter.use(requireAuth);
 
 // 2. JOB DESCRIPTION REVISIONS (HR Edit + Mandatory Independent Two-Person Approval)
 staffRouter.get('/revisions', async (req: AuthRequest, res) => {
-  if (!hasAdminStaffAccess(req)) {
-    return res.status(403).json({ error: 'Authorised staff privileges required.' });
+  try {
+    if (!hasAdminStaffAccess(req)) {
+      return res.status(403).json({ error: 'Authorised staff privileges required.' });
+    }
+    const rows = await withDbRetry(() =>
+      db
+        .select()
+        .from(staffPositionRevisions)
+        .orderBy(desc(staffPositionRevisions.createdAt))
+        .limit(50)
+    );
+    res.json({ revisions: rows });
+  } catch (err) {
+    console.error('Staff revisions load error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to load job description revisions.' });
   }
-  const rows = await db
-    .select()
-    .from(staffPositionRevisions)
-    .orderBy(desc(staffPositionRevisions.createdAt))
-    .limit(50);
-  res.json({ revisions: rows });
 });
 
 staffRouter.post('/positions/:jobId/revisions', requirePrivilegedMfa, async (req: AuthRequest, res) => {
@@ -2363,11 +2370,18 @@ staffRouter.patch('/performance/:id', requirePrivilegedMfa, async (req: AuthRequ
 
 // 9. INTERNAL STAFF COMMUNICATION & TASK MANAGEMENT CENTRE
 staffRouter.get('/tasks', async (req: AuthRequest, res) => {
-  if (!hasAdminStaffAccess(req)) {
-    return res.status(403).json({ error: 'Authorised staff access required.' });
+  try {
+    if (!hasAdminStaffAccess(req)) {
+      return res.status(403).json({ error: 'Authorised staff access required.' });
+    }
+    const tasks = await withDbRetry(() =>
+      db.select().from(internalStaffTasks).orderBy(desc(internalStaffTasks.createdAt))
+    );
+    res.json({ tasks });
+  } catch (err) {
+    console.error('Internal staff tasks load error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to load staff tasks.' });
   }
-  const tasks = await db.select().from(internalStaffTasks).orderBy(desc(internalStaffTasks.createdAt));
-  res.json({ tasks });
 });
 
 staffRouter.post('/tasks', requirePrivilegedMfa, async (req: AuthRequest, res) => {
@@ -2467,15 +2481,22 @@ staffRouter.patch('/tasks/:id/status', requirePrivilegedMfa, async (req: AuthReq
 });
 
 staffRouter.get('/messages', async (req: AuthRequest, res) => {
-  if (!hasAdminStaffAccess(req)) {
-    return res.status(403).json({ error: 'Authorised staff access required.' });
+  try {
+    if (!hasAdminStaffAccess(req)) {
+      return res.status(403).json({ error: 'Authorised staff access required.' });
+    }
+    const rows = await withDbRetry(() =>
+      db
+        .select()
+        .from(internalStaffMessages)
+        .orderBy(desc(internalStaffMessages.createdAt))
+        .limit(100)
+    );
+    res.json({ messages: rows });
+  } catch (err) {
+    console.error('Internal staff messages load error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({ error: 'Unable to load internal messages.' });
   }
-  const rows = await db
-    .select()
-    .from(internalStaffMessages)
-    .orderBy(desc(internalStaffMessages.createdAt))
-    .limit(100);
-  res.json({ messages: rows });
 });
 
 staffRouter.post('/messages', requirePrivilegedMfa, async (req: AuthRequest, res) => {
