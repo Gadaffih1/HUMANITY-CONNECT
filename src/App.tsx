@@ -8,6 +8,7 @@ import {
   Lock,
   Eye,
   EyeOff,
+  Mail,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import {
@@ -364,13 +365,20 @@ const HumanityConnectShell: React.FC = () => {
       <footer className="border-t border-[#102E36]/10 bg-[#FAF9F6] py-8 px-4 sm:px-6 lg:px-8 mt-12 print:hidden">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-[#4A636A]">
           <div className="flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-[#287A59]" />
+            <ShieldCheck className="w-4 h-4 text-[#287A59] shrink-0" />
             <span>
               <strong className="text-[#102E36]">HUMANITY CONNECT</strong> · Kenya Humanitarian &
               Sponsorship Platform · Child Safeguarding & Data Protection Compliant
             </span>
           </div>
-          <div className="flex items-center justify-end w-full sm:w-auto">
+          <div className="flex items-center justify-between sm:justify-end gap-4 w-full sm:w-auto">
+            <a
+              href="mailto:support@humanityconnect.co.ke"
+              className="inline-flex items-center gap-1.5 font-medium text-[#102E36] hover:text-[#287A59] transition-colors"
+            >
+              <Mail className="w-3.5 h-3.5 text-[#287A59] shrink-0" />
+              <span>Email: support@humanityconnect.co.ke</span>
+            </a>
             <button
               type="button"
               aria-label="Super Admin Login"

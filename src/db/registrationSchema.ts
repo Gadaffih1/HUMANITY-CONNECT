@@ -13,6 +13,17 @@ export function ensureSupporterRegistrationSchema(): Promise<void> {
 }
 
 async function createMissingSupporterTables(): Promise<void> {
+  const preCheck = await pool
+    .query<{ organisations: string | null; supporters: string | null }>(`
+      SELECT to_regclass('public.organisations')::text AS organisations,
+             to_regclass('public.supporter_profiles')::text AS supporters
+    `)
+    .catch(() => null);
+
+  if (preCheck?.rows?.[0]?.organisations && preCheck?.rows?.[0]?.supporters) {
+    return;
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -23,7 +34,7 @@ async function createMissingSupporterTables(): Promise<void> {
     `);
     if (!result.rows[0].organisations) {
       await client.query(`
-        CREATE TABLE public.organisations (
+        CREATE TABLE IF NOT EXISTS public.organisations (
           id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
           name text NOT NULL,
           org_type text NOT NULL,
@@ -38,7 +49,7 @@ async function createMissingSupporterTables(): Promise<void> {
     }
     if (!result.rows[0].supporters) {
       await client.query(`
-        CREATE TABLE public.supporter_profiles (
+        CREATE TABLE IF NOT EXISTS public.supporter_profiles (
           id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
           user_id uuid NOT NULL UNIQUE REFERENCES public.users(id) ON DELETE CASCADE,
           organisation_id uuid REFERENCES public.organisations(id),
@@ -51,8 +62,13 @@ async function createMissingSupporterTables(): Promise<void> {
       `);
     }
     await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    const code = err?.code || err?.cause?.code;
+    if (code === '42501') {
+      console.warn('Runtime schema bootstrap skipped due to restricted DB role (tables must exist via migration).');
+      return;
+    }
     throw err;
   } finally {
     client.release();

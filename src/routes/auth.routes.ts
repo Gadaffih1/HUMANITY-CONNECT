@@ -164,7 +164,9 @@ authRouter.post('/register', async (req, res) => {
     }
 
     if (validRoles[0] === 'SUPPORTIVE' || validRoles[0] === 'WELL_WISHER') {
-      await ensureSupporterRegistrationSchema();
+      await ensureSupporterRegistrationSchema().catch((schemaErr) => {
+        console.warn('Supporter schema check warning (non-fatal):', schemaErr);
+      });
     }
 
     const passwordHash = await hashPassword(data.password);
@@ -173,8 +175,10 @@ authRouter.post('/register', async (req, res) => {
     const emailOtp = generateNumericOtp(6);
     const phoneOtp = normalizedPhone?.ok ? generateNumericOtp(6) : undefined;
 
-    const { newUser, token } = await db.transaction(async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(174501, 11)`);
+    const { newUser, token } = await withDbRetry(
+      () =>
+        db.transaction(async (tx) => {
+          await tx.execute(sql`select pg_advisory_xact_lock(174501, 11)`);
 
       const [txEmailDup] = await tx
         .select({ id: users.id })
@@ -248,11 +252,14 @@ authRouter.post('/register', async (req, res) => {
         if (!roleRow) {
           throw new Error(`Unable to assign account category (${rCode}). Please contact support.`);
         }
-        await tx.insert(userRoles).values({
-          userId: insertedUser.id,
-          roleId: roleRow.id,
-          status: 'ACTIVE',
-        });
+        await tx
+          .insert(userRoles)
+          .values({
+            userId: insertedUser.id,
+            roleId: roleRow.id,
+            status: 'ACTIVE',
+          })
+          .onConflictDoNothing();
       }
 
       // Create beneficiary profile if any beneficiary classification selected
@@ -318,12 +325,18 @@ authRouter.post('/register', async (req, res) => {
       // Create supporter profile if Supportive or Well Wisher selected
       const supporterRole = validRoles.find((r) => ['SUPPORTIVE', 'WELL_WISHER'].includes(r));
       if (supporterRole) {
-        await tx.insert(supporterProfiles).values({
-          userId: insertedUser.id,
-          supporterType: data.supporterType || supporterRole,
-          displayName: data.organisationName || data.fullName.trim(),
-          preferredCurrency: data.countryCode.toUpperCase() === 'KE' ? 'KES' : 'USD',
-        });
+        await tx
+          .insert(supporterProfiles)
+          .values({
+            userId: insertedUser.id,
+            supporterType:
+              data.supporterType && ['SUPPORTIVE', 'WELL_WISHER', 'CORPORATE'].includes(data.supporterType)
+                ? data.supporterType
+                : supporterRole,
+            displayName: data.organisationName || data.fullName.trim(),
+            preferredCurrency: data.countryCode.toUpperCase() === 'KE' ? 'KES' : 'USD',
+          })
+          .onConflictDoNothing({ target: supporterProfiles.userId });
       }
 
       // Issue Email & Phone OTP verification tokens
@@ -372,8 +385,10 @@ authRouter.post('/register', async (req, res) => {
         body: 'Your account is active. Complete email and phone verification to unlock full portal actions.',
       });
 
-      return { newUser: insertedUser, token: signedToken };
-    });
+          return { newUser: insertedUser, token: signedToken };
+        }),
+      2
+    );
 
     if (newUser.phoneE164 && phoneOtp) {
       await dispatchTalksasaSms({
@@ -395,7 +410,27 @@ authRouter.post('/register', async (req, res) => {
       details: { roles: validRoles, countryCode: data.countryCode.toUpperCase() },
     });
 
-    const authUser = await loadUserAuthContext(newUser.id, validRoles[0], false, sessionId);
+    const authUser =
+      (await loadUserAuthContext(newUser.id, validRoles[0], false, sessionId).catch((ctxErr) => {
+        console.warn('Post-registration context load fallback:', ctxErr);
+        return null;
+      })) || {
+        userId: newUser.id,
+        email: newUser.email,
+        fullName: newUser.fullName,
+        phoneE164: newUser.phoneE164,
+        countryCode: newUser.countryCode,
+        emailVerified: Boolean(newUser.emailVerifiedAt),
+        phoneVerified: Boolean(newUser.phoneVerifiedAt),
+        mfaEnabled: newUser.mfaEnabled,
+        mfaVerifiedInSession: false,
+        approvalStatus: newUser.approvalStatus as any,
+        roles: validRoles,
+        activeRole: validRoles[0],
+        permissions: [],
+        sessionId,
+      };
+
     setSessionCookie(req, res, token);
     res.status(201).json({
       token,
@@ -406,17 +441,34 @@ authRouter.post('/register', async (req, res) => {
       },
     });
   } catch (err: unknown) {
-    const outer = err && typeof err === 'object' ? err as { code?: string; cause?: unknown } : {};
-    const cause = outer.cause && typeof outer.cause === 'object'
-      ? outer.cause as { code?: string; table?: string; column?: string; constraint?: string }
-      : outer as { code?: string; table?: string; column?: string; constraint?: string };
+    const outer =
+      err && typeof err === 'object'
+        ? (err as { code?: string; message?: string; cause?: unknown })
+        : {};
+    const cause =
+      outer.cause && typeof outer.cause === 'object'
+        ? (outer.cause as {
+            code?: string;
+            message?: string;
+            table?: string;
+            column?: string;
+            constraint?: string;
+          })
+        : (outer as {
+            code?: string;
+            message?: string;
+            table?: string;
+            column?: string;
+            constraint?: string;
+          });
     console.error('Registration failed:', {
-      code: cause.code,
+      message: cause.message || outer.message,
+      code: cause.code || outer.code,
       table: cause.table,
       column: cause.column,
       constraint: cause.constraint,
     });
-    if (cause.code === '23505') {
+    if ((cause.code || outer.code) === '23505') {
       if (cause.constraint?.toLowerCase().includes('phone')) {
         return res.status(409).json({
           error: 'An account with this phone number already exists. Only one account can be registered per phone number.',

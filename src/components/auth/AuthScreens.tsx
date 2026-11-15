@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   KeyRound,
   Smartphone,
@@ -32,6 +32,7 @@ export const AuthScreens: React.FC<{
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>(initialMode);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const feedbackRef = useRef<HTMLDivElement | null>(null);
 
   // Login form
   const [loginEmail, setLoginEmail] = useState('');
@@ -72,6 +73,12 @@ export const AuthScreens: React.FC<{
       setSelectedRoles([presetRole as RoleCode]);
     }
   }, [presetRole]);
+
+  useEffect(() => {
+    if (feedback && feedbackRef.current) {
+      feedbackRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [feedback]);
 
   const selectRole = (code: RoleCode) => {
     setSelectedRoles([code]);
@@ -137,6 +144,8 @@ export const AuthScreens: React.FC<{
       return;
     }
 
+    const isSupporterCategory = selectedRoles.some((r) => ['SUPPORTIVE', 'WELL_WISHER'].includes(r));
+
     setBusy(true);
     try {
       await registerAccount({
@@ -148,12 +157,22 @@ export const AuthScreens: React.FC<{
         selectedRoles,
         county,
         subCounty: subCounty.trim() || undefined,
-        guardianOrgName: isOrphanSelected ? guardianOrgName.trim() || undefined : undefined,
-        guardianRelationship: isOrphanSelected ? guardianRelationship.trim() || undefined : undefined,
-        isMinorCase: isOrphanSelected,
-        organisationName: isWellWisherSelected ? organisationName.trim() || undefined : undefined,
-        supporterType: isWellWisherSelected ? 'WELL_WISHER' : 'SUPPORTIVE',
-        vulnerabilitySummary: isBeneficiarySelected ? vulnerabilitySummary.trim() || undefined : undefined,
+        ...(isOrphanSelected
+          ? {
+              guardianOrgName: guardianOrgName.trim() || undefined,
+              guardianRelationship: guardianRelationship.trim() || undefined,
+              isMinorCase: true,
+            }
+          : {}),
+        ...(isWellWisherSelected
+          ? { organisationName: organisationName.trim() || undefined }
+          : {}),
+        ...(isSupporterCategory
+          ? { supporterType: isWellWisherSelected ? 'WELL_WISHER' : 'SUPPORTIVE' }
+          : {}),
+        ...(isBeneficiarySelected
+          ? { vulnerabilitySummary: vulnerabilitySummary.trim() || undefined }
+          : {}),
       });
       onSuccess();
     } catch (err: any) {
@@ -257,6 +276,8 @@ export const AuthScreens: React.FC<{
 
           {feedback && (
             <div
+              ref={feedbackRef}
+              role="alert"
               className={`p-3.5 rounded-xl text-sm flex items-start gap-2.5 border ${
                 feedback.type === 'error'
                   ? 'bg-[#9F2D20]/10 border-[#9F2D20]/25 text-[#9F2D20]'
@@ -388,6 +409,7 @@ export const AuthScreens: React.FC<{
                   <label className="block text-xs font-semibold text-[#102E36] mb-1">Full Name</label>
                   <input
                     type="text"
+                    autoComplete="name"
                     required
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
@@ -401,6 +423,7 @@ export const AuthScreens: React.FC<{
                   </label>
                   <input
                     type="tel"
+                    autoComplete="tel"
                     required
                     value={phoneE164}
                     onChange={(e) => setPhoneE164(e.target.value)}
@@ -415,6 +438,7 @@ export const AuthScreens: React.FC<{
                   <label className="block text-xs font-semibold text-[#102E36] mb-1">Email</label>
                   <input
                     type="email"
+                    autoComplete="email"
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -528,8 +552,15 @@ export const AuthScreens: React.FC<{
                 </div>
               )}
 
+              <div className="text-xs text-[#4A636A]">
+                Creating account under:{' '}
+                <strong className="text-[#102E36]">
+                  {ROLE_DEFINITIONS[selectedRoles[0]]?.label || selectedRoles[0]}
+                </strong>
+              </div>
+
               <GlossyButton type="submit" variant="gold" size="lg" className="w-full" disabled={busy}>
-                {busy ? 'Provisioning Account...' : 'Create Humanity Connect Account'}
+                {busy ? 'Provisioning Account...' : `Create ${ROLE_DEFINITIONS[selectedRoles[0]]?.shortLabel || 'Humanity Connect'} Account`}
               </GlossyButton>
             </form>
           )}
