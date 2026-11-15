@@ -2,7 +2,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { eq, and, desc, sql } from 'drizzle-orm';
-import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
+import { db, isTransientDbError, toSafeClientErrorMessage, withDbRetry } from '../db/index.ts';
 import {
   donations,
   paymentTransactions,
@@ -320,9 +320,9 @@ paymentsRouter.post('/mpesa/callback', async (req, res) => {
     });
 
     res.json({ ResultCode: 0, ResultDesc: 'Accepted', ...result });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('M-Pesa callback error:', err);
-    res.status(400).json({ error: err.message || 'Callback rejected.' });
+    res.status(400).json({ error: toSafeClientErrorMessage(err, 'Callback rejected.') });
   }
 });
 

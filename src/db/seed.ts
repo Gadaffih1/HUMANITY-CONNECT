@@ -27,7 +27,9 @@ import { encryptSensitiveText, hashPassword, verifyPassword } from '../lib/crypt
 import { STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
 import { ensureStaffEstablishmentDirectoryReady } from './staffEstablishmentSchema.ts';
 import {
+  ensureFullApplicationSchemaReady,
   ensureGovernanceSettingsSchemaReady,
+  ensureMatchingSchemaReady,
   ensureRegistrationSchemaReady,
 } from './registrationSchema.ts';
 
@@ -327,6 +329,9 @@ async function runSeed(): Promise<void> {
         has_user_perms: boolean;
         has_user_county: boolean;
         has_staff_depts: boolean;
+        has_matching_config: boolean;
+        has_match_suggestions: boolean;
+        has_donations: boolean;
       }>(`
         SELECT
           CASE WHEN to_regclass('public.roles') IS NOT NULL THEN (SELECT count(*)::int FROM public.roles) ELSE 0 END AS roles_count,
@@ -340,6 +345,9 @@ async function runSeed(): Promise<void> {
           (to_regclass('public.user_sessions') IS NOT NULL) AS has_sessions,
           (to_regclass('public.user_permissions') IS NOT NULL) AS has_user_perms,
           (to_regclass('public.staff_departments') IS NOT NULL) AS has_staff_depts,
+          (to_regclass('public.matching_engine_config') IS NOT NULL) AS has_matching_config,
+          (to_regclass('public.sponsorship_match_suggestions') IS NOT NULL) AS has_match_suggestions,
+          (to_regclass('public.donations') IS NOT NULL) AS has_donations,
           EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'county'
@@ -359,6 +367,19 @@ async function runSeed(): Promise<void> {
     });
     await ensureRegistrationSchemaReady().catch((regSchemaErr) => {
       console.warn('Registration schema check warning:', regSchemaErr);
+    });
+  }
+
+  if (
+    !fastCheck?.rows?.[0]?.has_matching_config ||
+    !fastCheck?.rows?.[0]?.has_match_suggestions ||
+    !fastCheck?.rows?.[0]?.has_donations
+  ) {
+    await ensureMatchingSchemaReady().catch((matchSchemaErr) => {
+      console.warn('Matching schema check warning:', matchSchemaErr);
+    });
+    await ensureFullApplicationSchemaReady().catch((fullSchemaErr) => {
+      console.warn('Full application schema check warning:', fullSchemaErr);
     });
   }
 

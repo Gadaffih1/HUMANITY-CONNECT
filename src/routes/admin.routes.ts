@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { eq, desc, sql, inArray } from 'drizzle-orm';
-import { db, isTransientDbError, pool, withDbRetry } from '../db/index.ts';
+import { db, isTransientDbError, pool, toSafeClientErrorMessage, withDbRetry } from '../db/index.ts';
 import {
   users,
   roles,
@@ -288,21 +288,226 @@ adminRouter.get('/overview', async (req: AuthRequest, res) => {
   }
 });
 
-// Super Admin Registered User Accounts Directory (all accounts: name, contact, county, sub-county)
+// Super Admin Registered User Accounts Directory (all accounts & all registered details)
 adminRouter.get(
   '/users-directory',
   requireRole('SUPER_ADMIN'),
   async (_req: AuthRequest, res) => {
     try {
       const regProbe = await withDbRetry(() =>
-        pool.query<{ has_sep: boolean; has_fgo: boolean }>(`
+        pool.query<{
+          has_bp: boolean;
+          has_gr: boolean;
+          has_sp: boolean;
+          has_org: boolean;
+          has_vc: boolean;
+          has_sep: boolean;
+          has_fgo: boolean;
+        }>(`
           SELECT
+            (to_regclass('public.beneficiary_profiles') IS NOT NULL) AS has_bp,
+            (to_regclass('public.guardian_relationships') IS NOT NULL) AS has_gr,
+            (to_regclass('public.supporter_profiles') IS NOT NULL) AS has_sp,
+            (to_regclass('public.organisations') IS NOT NULL) AS has_org,
+            (to_regclass('public.verification_cases') IS NOT NULL) AS has_vc,
             (to_regclass('public.staff_employee_profiles') IS NOT NULL) AS has_sep,
             (to_regclass('public.field_geography_officers') IS NOT NULL) AS has_fgo
         `)
-      ).catch(() => ({ rows: [{ has_sep: false, has_fgo: false }] }));
-      const hasSep = Boolean(regProbe.rows[0]?.has_sep);
-      const hasFgo = Boolean(regProbe.rows[0]?.has_fgo);
+      ).catch(() => ({
+        rows: [
+          {
+            has_bp: false,
+            has_gr: false,
+            has_sp: false,
+            has_org: false,
+            has_vc: false,
+            has_sep: false,
+            has_fgo: false,
+          },
+        ],
+      }));
+      const flags = regProbe.rows[0] || {
+        has_bp: false,
+        has_gr: false,
+        has_sp: false,
+        has_org: false,
+        has_vc: false,
+        has_sep: false,
+        has_fgo: false,
+      };
+
+      const countyParts = ['NULLIF(u.county, \'\')'];
+      const subCountyParts = ['NULLIF(u.sub_county, \'\')'];
+      const wardParts: string[] = [];
+      if (flags.has_bp) {
+        countyParts.push('bp.county');
+        subCountyParts.push('bp.sub_county');
+        wardParts.push('bp.ward');
+      }
+      if (flags.has_sep) {
+        countyParts.push('sep.county_assignment');
+        subCountyParts.push('sep.sub_county_assignment');
+      }
+      if (flags.has_fgo) {
+        countyParts.push('fgo.county');
+        subCountyParts.push('fgo.sub_county');
+        wardParts.push('fgo.ward');
+      }
+
+      const countyExpr = `COALESCE(${countyParts.join(', ')})`;
+      const subCountyExpr = `COALESCE(${subCountyParts.join(', ')})`;
+      const wardExpr = wardParts.length > 0 ? `COALESCE(${wardParts.join(', ')})` : 'NULL::text';
+
+      const extraSelects = [
+        flags.has_bp ? 'bp.classification AS beneficiary_classification' : 'NULL::text AS beneficiary_classification',
+        flags.has_bp ? 'bp.reference_code AS beneficiary_ref' : 'NULL::text AS beneficiary_ref',
+        flags.has_bp ? 'bp.display_alias AS display_alias' : 'NULL::text AS display_alias',
+        flags.has_bp ? 'bp.vulnerability_summary AS vulnerability_summary' : 'NULL::text AS vulnerability_summary',
+        flags.has_bp ? 'bp.guardian_org_name AS guardian_org_name' : 'NULL::text AS guardian_org_name',
+        flags.has_bp ? 'bp.is_minor_case AS is_minor_case' : 'false AS is_minor_case',
+        flags.has_bp ? 'bp.verification_level AS verification_level' : 'NULL::text AS verification_level',
+        flags.has_bp ? 'bp.verification_status AS verification_status' : 'NULL::text AS verification_status',
+        flags.has_bp ? 'bp.safeguarding_cleared AS safeguarding_cleared' : 'false AS safeguarding_cleared',
+        flags.has_bp ? 'bp.public_listing_approved AS public_listing_approved' : 'false AS public_listing_approved',
+        flags.has_bp ? 'bp.monthly_need_target_minor AS monthly_need_target_minor' : 'NULL::integer AS monthly_need_target_minor',
+        flags.has_bp ? 'bp.age_group AS age_group' : 'NULL::text AS age_group',
+        flags.has_bp && flags.has_gr ? 'gr.relationship_type AS guardian_relationship' : 'NULL::text AS guardian_relationship',
+        flags.has_bp && flags.has_vc ? 'vc.case_number AS case_number' : 'NULL::text AS case_number',
+        flags.has_bp && flags.has_vc ? 'vc.stage AS case_stage' : 'NULL::text AS case_stage',
+        flags.has_sp ? 'sp.supporter_type AS supporter_type' : 'NULL::text AS supporter_type',
+        flags.has_sp ? 'sp.display_name AS supporter_display_name' : 'NULL::text AS supporter_display_name',
+        flags.has_sp ? 'sp.preferred_currency AS preferred_currency' : 'NULL::text AS preferred_currency',
+        flags.has_sp ? 'sp.anonymous_giving AS anonymous_giving' : 'false AS anonymous_giving',
+        flags.has_sp && flags.has_org ? 'org.name AS organisation_name' : 'NULL::text AS organisation_name',
+        flags.has_sp && flags.has_org ? 'org.org_type AS organisation_type' : 'NULL::text AS organisation_type',
+        flags.has_sp && flags.has_org ? 'org.verification_status AS organisation_status' : 'NULL::text AS organisation_status',
+      ];
+
+      const lateralJoins: string[] = [];
+      const groupByCols: string[] = [
+        'u.id',
+        'u.full_name',
+        'u.email',
+        'u.phone_e164',
+        'u.country_code',
+        'u.county',
+        'u.sub_county',
+        'u.preferred_language',
+        'u.approval_status',
+        'u.suspension_reason',
+        'u.email_verified_at',
+        'u.phone_verified_at',
+        'u.mfa_enabled',
+        'u.last_login_at',
+        'u.created_at',
+      ];
+
+      if (flags.has_bp) {
+        lateralJoins.push(`
+          LEFT JOIN LATERAL (
+            SELECT id, county, sub_county, ward, classification, reference_code,
+                   display_alias, vulnerability_summary, guardian_org_name,
+                   is_minor_case, verification_level, verification_status,
+                   safeguarding_cleared, public_listing_approved,
+                   monthly_need_target_minor, age_group
+            FROM public.beneficiary_profiles
+            WHERE user_id = u.id
+            LIMIT 1
+          ) bp ON TRUE
+        `);
+        groupByCols.push(
+          'bp.county',
+          'bp.sub_county',
+          'bp.ward',
+          'bp.classification',
+          'bp.reference_code',
+          'bp.display_alias',
+          'bp.vulnerability_summary',
+          'bp.guardian_org_name',
+          'bp.is_minor_case',
+          'bp.verification_level',
+          'bp.verification_status',
+          'bp.safeguarding_cleared',
+          'bp.public_listing_approved',
+          'bp.monthly_need_target_minor',
+          'bp.age_group'
+        );
+        if (flags.has_gr) {
+          lateralJoins.push(`
+            LEFT JOIN LATERAL (
+              SELECT relationship_type
+              FROM public.guardian_relationships
+              WHERE beneficiary_id = bp.id AND guardian_user_id = u.id
+              LIMIT 1
+            ) gr ON TRUE
+          `);
+          groupByCols.push('gr.relationship_type');
+        }
+        if (flags.has_vc) {
+          lateralJoins.push(`
+            LEFT JOIN LATERAL (
+              SELECT case_number, stage
+              FROM public.verification_cases
+              WHERE beneficiary_id = bp.id
+              ORDER BY created_at DESC
+              LIMIT 1
+            ) vc ON TRUE
+          `);
+          groupByCols.push('vc.case_number', 'vc.stage');
+        }
+      }
+
+      if (flags.has_sp) {
+        lateralJoins.push(`
+          LEFT JOIN LATERAL (
+            SELECT organisation_id, supporter_type, display_name, preferred_currency, anonymous_giving
+            FROM public.supporter_profiles
+            WHERE user_id = u.id
+            LIMIT 1
+          ) sp ON TRUE
+        `);
+        groupByCols.push(
+          'sp.supporter_type',
+          'sp.display_name',
+          'sp.preferred_currency',
+          'sp.anonymous_giving'
+        );
+        if (flags.has_org) {
+          lateralJoins.push(`
+            LEFT JOIN LATERAL (
+              SELECT name, org_type, verification_status
+              FROM public.organisations
+              WHERE id = sp.organisation_id
+              LIMIT 1
+            ) org ON TRUE
+          `);
+          groupByCols.push('org.name', 'org.org_type', 'org.verification_status');
+        }
+      }
+
+      if (flags.has_sep) {
+        lateralJoins.push(`
+          LEFT JOIN LATERAL (
+            SELECT county_assignment, sub_county_assignment
+            FROM public.staff_employee_profiles
+            WHERE user_id = u.id
+            LIMIT 1
+          ) sep ON TRUE
+        `);
+        groupByCols.push('sep.county_assignment', 'sep.sub_county_assignment');
+      }
+
+      if (flags.has_fgo) {
+        lateralJoins.push(`
+          LEFT JOIN LATERAL (
+            SELECT county, sub_county, ward
+            FROM public.field_geography_officers
+            WHERE user_id = u.id
+            LIMIT 1
+          ) fgo ON TRUE
+        `);
+        groupByCols.push('fgo.county', 'fgo.sub_county', 'fgo.ward');
+      }
 
       const directoryRes = await withDbRetry(() =>
         pool.query<{
@@ -314,7 +519,9 @@ adminRouter.get(
           county: string | null;
           sub_county: string | null;
           ward: string | null;
+          preferred_language: string;
           approval_status: string;
+          suspension_reason: string | null;
           email_verified: boolean;
           phone_verified: boolean;
           mfa_enabled: boolean;
@@ -323,6 +530,26 @@ adminRouter.get(
           roles: string[] | null;
           beneficiary_classification: string | null;
           beneficiary_ref: string | null;
+          display_alias: string | null;
+          vulnerability_summary: string | null;
+          guardian_org_name: string | null;
+          is_minor_case: boolean;
+          verification_level: string | null;
+          verification_status: string | null;
+          safeguarding_cleared: boolean;
+          public_listing_approved: boolean;
+          monthly_need_target_minor: number | null;
+          age_group: string | null;
+          guardian_relationship: string | null;
+          case_number: string | null;
+          case_stage: string | null;
+          supporter_type: string | null;
+          supporter_display_name: string | null;
+          preferred_currency: string | null;
+          anonymous_giving: boolean;
+          organisation_name: string | null;
+          organisation_type: string | null;
+          organisation_status: string | null;
         }>(`
           SELECT
             u.id,
@@ -330,10 +557,12 @@ adminRouter.get(
             u.email,
             u.phone_e164,
             u.country_code,
-            COALESCE(NULLIF(u.county, ''), bp.county ${hasSep ? ', sep.county_assignment' : ''} ${hasFgo ? ', fgo.county' : ''}) AS county,
-            COALESCE(NULLIF(u.sub_county, ''), bp.sub_county ${hasSep ? ', sep.sub_county_assignment' : ''} ${hasFgo ? ', fgo.sub_county' : ''}) AS sub_county,
-            COALESCE(bp.ward ${hasFgo ? ', fgo.ward' : ''}) AS ward,
+            ${countyExpr} AS county,
+            ${subCountyExpr} AS sub_county,
+            ${wardExpr} AS ward,
+            u.preferred_language,
             u.approval_status,
+            u.suspension_reason,
             (u.email_verified_at IS NOT NULL) AS email_verified,
             (u.phone_verified_at IS NOT NULL) AS phone_verified,
             u.mfa_enabled,
@@ -343,58 +572,13 @@ adminRouter.get(
               ARRAY_AGG(DISTINCT r.code) FILTER (WHERE r.code IS NOT NULL),
               ARRAY[]::text[]
             ) AS roles,
-            bp.classification AS beneficiary_classification,
-            bp.reference_code AS beneficiary_ref
+            ${extraSelects.join(',\n            ')}
           FROM public.users u
           LEFT JOIN public.user_roles ur ON ur.user_id = u.id AND ur.status = 'ACTIVE'
           LEFT JOIN public.roles r ON r.id = ur.role_id
-          LEFT JOIN LATERAL (
-            SELECT county, sub_county, ward, classification, reference_code
-            FROM public.beneficiary_profiles
-            WHERE user_id = u.id
-            LIMIT 1
-          ) bp ON TRUE
-          ${
-            hasSep
-              ? `LEFT JOIN LATERAL (
-                  SELECT county_assignment, sub_county_assignment
-                  FROM public.staff_employee_profiles
-                  WHERE user_id = u.id
-                  LIMIT 1
-                ) sep ON TRUE`
-              : ''
-          }
-          ${
-            hasFgo
-              ? `LEFT JOIN LATERAL (
-                  SELECT county, sub_county, ward
-                  FROM public.field_geography_officers
-                  WHERE user_id = u.id
-                  LIMIT 1
-                ) fgo ON TRUE`
-              : ''
-          }
+          ${lateralJoins.join('\n          ')}
           GROUP BY
-            u.id,
-            u.full_name,
-            u.email,
-            u.phone_e164,
-            u.country_code,
-            u.county,
-            u.sub_county,
-            u.approval_status,
-            u.email_verified_at,
-            u.phone_verified_at,
-            u.mfa_enabled,
-            u.last_login_at,
-            u.created_at,
-            bp.county,
-            bp.sub_county,
-            bp.ward,
-            bp.classification,
-            bp.reference_code
-            ${hasSep ? ', sep.county_assignment, sep.sub_county_assignment' : ''}
-            ${hasFgo ? ', fgo.county, fgo.sub_county, fgo.ward' : ''}
+            ${groupByCols.join(',\n            ')}
           ORDER BY u.created_at DESC;
         `)
       );
@@ -408,7 +592,9 @@ adminRouter.get(
         county: row.county,
         subCounty: row.sub_county,
         ward: row.ward,
+        preferredLanguage: row.preferred_language,
         approvalStatus: row.approval_status,
+        suspensionReason: row.suspension_reason,
         emailVerified: Boolean(row.email_verified),
         phoneVerified: Boolean(row.phone_verified),
         mfaEnabled: Boolean(row.mfa_enabled),
@@ -417,6 +603,26 @@ adminRouter.get(
         roles: Array.isArray(row.roles) ? row.roles : [],
         beneficiaryClassification: row.beneficiary_classification,
         beneficiaryRef: row.beneficiary_ref,
+        displayAlias: row.display_alias,
+        vulnerabilitySummary: row.vulnerability_summary,
+        guardianOrgName: row.guardian_org_name,
+        guardianRelationship: row.guardian_relationship,
+        isMinorCase: Boolean(row.is_minor_case),
+        verificationLevel: row.verification_level,
+        verificationStatus: row.verification_status,
+        safeguardingCleared: Boolean(row.safeguarding_cleared),
+        publicListingApproved: Boolean(row.public_listing_approved),
+        monthlyNeedTargetMinor: row.monthly_need_target_minor,
+        ageGroup: row.age_group,
+        caseNumber: row.case_number,
+        caseStage: row.case_stage,
+        supporterType: row.supporter_type,
+        supporterDisplayName: row.supporter_display_name,
+        preferredCurrency: row.preferred_currency,
+        anonymousGiving: Boolean(row.anonymous_giving),
+        organisationName: row.organisation_name,
+        organisationType: row.organisation_type,
+        organisationStatus: row.organisation_status,
       }));
 
       res.json({
@@ -803,8 +1009,11 @@ adminRouter.post('/finance/disburse', requirePrivilegedMfa, async (req: AuthRequ
     });
 
     res.status(201).json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Disbursement failed.' });
+  } catch (err: unknown) {
+    console.error('Admin central fund disbursement error:', err);
+    res.status(isTransientDbError(err) ? 503 : 400).json({
+      error: toSafeClientErrorMessage(err, 'Disbursement failed.'),
+    });
   }
 });
 

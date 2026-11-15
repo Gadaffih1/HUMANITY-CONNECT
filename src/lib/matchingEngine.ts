@@ -1,6 +1,7 @@
 import { ThinkingLevel, Type } from '@google/genai';
 import { eq, and, desc, inArray } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, withDbRetry } from '../db/index.ts';
+import { ensureMatchingSchemaReady } from '../db/registrationSchema.ts';
 import {
   matchingEngineConfig,
   sponsorMatchingPreferences,
@@ -50,11 +51,15 @@ export function normalizeWeights(cfg: {
 }
 
 export async function getOrCreateMatchingConfig() {
-  const [existing] = await db
-    .select()
-    .from(matchingEngineConfig)
-    .where(eq(matchingEngineConfig.configKey, 'DEFAULT'))
-    .limit(1);
+  await ensureMatchingSchemaReady().catch(() => {});
+
+  const [existing] = await withDbRetry(() =>
+    db
+      .select()
+      .from(matchingEngineConfig)
+      .where(eq(matchingEngineConfig.configKey, 'DEFAULT'))
+      .limit(1)
+  );
 
   if (existing) {
     return {
@@ -63,20 +68,24 @@ export async function getOrCreateMatchingConfig() {
     };
   }
 
-  const [created] = await db
-    .insert(matchingEngineConfig)
-    .values({ configKey: 'DEFAULT' })
-    .onConflictDoNothing({ target: matchingEngineConfig.configKey })
-    .returning();
+  const [created] = await withDbRetry(() =>
+    db
+      .insert(matchingEngineConfig)
+      .values({ configKey: 'DEFAULT' })
+      .onConflictDoNothing({ target: matchingEngineConfig.configKey })
+      .returning()
+  );
 
   const row =
     created ||
     (
-      await db
-        .select()
-        .from(matchingEngineConfig)
-        .where(eq(matchingEngineConfig.configKey, 'DEFAULT'))
-        .limit(1)
+      await withDbRetry(() =>
+        db
+          .select()
+          .from(matchingEngineConfig)
+          .where(eq(matchingEngineConfig.configKey, 'DEFAULT'))
+          .limit(1)
+      )
     )[0];
 
   return {
@@ -86,11 +95,15 @@ export async function getOrCreateMatchingConfig() {
 }
 
 export async function getOrCreateSponsorPreferences(supporterId: string, supporterType: string, hasOrg: boolean) {
-  const [existing] = await db
-    .select()
-    .from(sponsorMatchingPreferences)
-    .where(eq(sponsorMatchingPreferences.supporterId, supporterId))
-    .limit(1);
+  await ensureMatchingSchemaReady().catch(() => {});
+
+  const [existing] = await withDbRetry(() =>
+    db
+      .select()
+      .from(sponsorMatchingPreferences)
+      .where(eq(sponsorMatchingPreferences.supporterId, supporterId))
+      .limit(1)
+  );
   if (existing) return existing;
 
   const entityType =

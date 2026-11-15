@@ -308,4 +308,442 @@ VALUES
   ('WELL_WISHER', 'Well Wisher', 'Philanthropist, corporate partner, foundation, or humanitarian institution.', false, false, false, true)
 ON CONFLICT (code) DO NOTHING;
 
+-- 7. AI Matching Engine, Needs, Donations, Sponsorships & Operational Ledger Tables
+CREATE TABLE IF NOT EXISTS public.permissions (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  code text NOT NULL UNIQUE,
+  module text NOT NULL,
+  description text NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.role_permissions (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  role_id uuid NOT NULL REFERENCES public.roles(id) ON DELETE CASCADE,
+  permission_id uuid NOT NULL REFERENCES public.permissions(id) ON DELETE CASCADE,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_role_permission ON public.role_permissions USING btree (role_id, permission_id);
+
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  actor_user_id uuid REFERENCES public.users(id),
+  actor_role text NOT NULL,
+  action text NOT NULL,
+  entity_type text NOT NULL,
+  entity_id text,
+  ip_hash text,
+  details_json jsonb,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.media_records (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  owner_user_id uuid NOT NULL REFERENCES public.users(id),
+  beneficiary_id uuid REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  doc_category text NOT NULL,
+  storage_bucket text DEFAULT 'hc-private-vault-ke' NOT NULL,
+  object_key text NOT NULL UNIQUE,
+  mime_type text NOT NULL,
+  byte_size integer NOT NULL,
+  checksum_sha256 text NOT NULL,
+  access_scope text DEFAULT 'PRIVATE_ENCRYPTED' NOT NULL,
+  encryption_key_ref text NOT NULL,
+  review_status text DEFAULT 'PENDING_REVIEW' NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.needs_categories (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  code text NOT NULL UNIQUE,
+  name text NOT NULL,
+  description text NOT NULL,
+  default_priority_weight integer DEFAULT 10 NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.need_requests (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  reference_code text NOT NULL UNIQUE,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  category_id uuid NOT NULL REFERENCES public.needs_categories(id),
+  title text NOT NULL,
+  description text NOT NULL,
+  supporting_evidence_notes text,
+  supporting_media_id uuid REFERENCES public.media_records(id),
+  target_amount_minor integer NOT NULL,
+  approved_amount_minor integer,
+  fulfilled_amount_minor integer DEFAULT 0 NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  deadline_at timestamptz,
+  is_recurring boolean DEFAULT false NOT NULL,
+  frequency text DEFAULT 'ONE_TIME' NOT NULL,
+  duration_months integer DEFAULT 1 NOT NULL,
+  priority_tier text DEFAULT 'P3_HIGH' NOT NULL,
+  urgency_level text DEFAULT 'HIGH' NOT NULL,
+  verification_status text DEFAULT 'PENDING_REVIEW' NOT NULL,
+  status text DEFAULT 'SUBMITTED' NOT NULL,
+  human_approved_by uuid REFERENCES public.users(id),
+  human_approved_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL,
+  updated_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.priority_assessments (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  need_request_id uuid NOT NULL REFERENCES public.need_requests(id) ON DELETE CASCADE,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  assessed_by uuid NOT NULL REFERENCES public.users(id),
+  vulnerability_score integer NOT NULL,
+  urgency_score integer NOT NULL,
+  dependency_score integer NOT NULL,
+  safeguarding_risk_score integer DEFAULT 10 NOT NULL,
+  empowerment_potential_score integer DEFAULT 5 NOT NULL,
+  composite_priority integer NOT NULL,
+  ai_advisory_tier text,
+  human_final_tier text NOT NULL,
+  assessment_reasons jsonb DEFAULT '[]'::jsonb NOT NULL,
+  rationale text NOT NULL,
+  human_approved boolean DEFAULT false NOT NULL,
+  assessed_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.household_members (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  member_alias text NOT NULL,
+  full_name_enc text NOT NULL,
+  relationship text NOT NULL,
+  age_years integer NOT NULL,
+  is_minor boolean DEFAULT false NOT NULL,
+  schooling_status text,
+  health_notes_enc text,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.beneficiary_stories (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  title text NOT NULL,
+  summary text NOT NULL,
+  narrative text NOT NULL,
+  language text DEFAULT 'en' NOT NULL,
+  cover_image_path text,
+  consent_verified boolean DEFAULT false NOT NULL,
+  is_published boolean DEFAULT false NOT NULL,
+  approved_by uuid REFERENCES public.users(id),
+  published_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.matching_engine_config (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  config_key text DEFAULT 'DEFAULT' NOT NULL UNIQUE,
+  algorithm_name text DEFAULT 'Humanity Connect Dynamic Impact Matcher' NOT NULL,
+  weight_need_alignment integer DEFAULT 30 NOT NULL,
+  weight_location_focus integer DEFAULT 20 NOT NULL,
+  weight_budget_fit integer DEFAULT 20 NOT NULL,
+  weight_urgency_impact integer DEFAULT 20 NOT NULL,
+  weight_age_demographics integer DEFAULT 10 NOT NULL,
+  prioritise_underfunded_pct integer DEFAULT 60 NOT NULL,
+  min_threshold_score integer DEFAULT 35 NOT NULL,
+  enable_gemini_analysis boolean DEFAULT true NOT NULL,
+  require_human_safeguard_gate boolean DEFAULT true NOT NULL,
+  transparency_notes text DEFAULT 'Scores combine deterministic weighted criteria (Need, Location, Budget, Urgency/Underfunded Gap, Age/Challenges) with bounded Gemini AI contextual analysis. Only V4-verified, safeguarding-cleared cases are eligible.' NOT NULL,
+  updated_by uuid REFERENCES public.users(id),
+  updated_at timestamptz DEFAULT now() NOT NULL
+);
+
+INSERT INTO public.matching_engine_config (config_key)
+VALUES ('DEFAULT')
+ON CONFLICT (config_key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS public.sponsor_matching_preferences (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  supporter_id uuid NOT NULL UNIQUE REFERENCES public.supporter_profiles(id) ON DELETE CASCADE,
+  sponsor_entity_type text DEFAULT 'INDIVIDUAL' NOT NULL,
+  budget_minor integer DEFAULT 600000 NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  preferred_cadence text DEFAULT 'MONTHLY' NOT NULL,
+  interest_categories jsonb DEFAULT '["EDUCATION","FOOD","MEDICAL"]'::jsonb NOT NULL,
+  location_focus jsonb DEFAULT '["ALL"]'::jsonb NOT NULL,
+  preferred_age_groups jsonb DEFAULT '["ALL"]'::jsonb NOT NULL,
+  preferred_classifications jsonb DEFAULT '["ORPHAN_GUARDIAN","DESTITUTE","NEEDY"]'::jsonb NOT NULL,
+  impact_goal text DEFAULT 'Prioritise high-urgency household stability, schooling continuity, and sustainable livelihoods.' NOT NULL,
+  proactive_opt_in boolean DEFAULT true NOT NULL,
+  updated_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.sponsorship_match_suggestions (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  supporter_id uuid NOT NULL REFERENCES public.supporter_profiles(id) ON DELETE CASCADE,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  need_request_id uuid REFERENCES public.need_requests(id),
+  composite_score integer NOT NULL,
+  breakdown_json jsonb NOT NULL,
+  beneficiary_signals_json jsonb NOT NULL,
+  gemini_rationale text,
+  gemini_impact_projection text,
+  recommended_approach text,
+  used_model text,
+  status text DEFAULT 'SUGGESTED' NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_match_suggestions_supporter ON public.sponsorship_match_suggestions USING btree (supporter_id, composite_score);
+
+CREATE TABLE IF NOT EXISTS public.humanitarian_funds (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  code text NOT NULL UNIQUE,
+  name text NOT NULL,
+  fund_type text NOT NULL,
+  organisation_id uuid REFERENCES public.organisations(id),
+  country_code text DEFAULT 'KE' NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  available_balance_minor integer DEFAULT 0 NOT NULL,
+  total_received_minor integer DEFAULT 0 NOT NULL,
+  total_disbursed_minor integer DEFAULT 0 NOT NULL,
+  description text NOT NULL,
+  is_active boolean DEFAULT true NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.donations (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  supporter_id uuid NOT NULL REFERENCES public.supporter_profiles(id),
+  pathway text NOT NULL,
+  beneficiary_id uuid REFERENCES public.beneficiary_profiles(id),
+  need_request_id uuid REFERENCES public.need_requests(id),
+  fund_id uuid REFERENCES public.humanitarian_funds(id),
+  is_pledge boolean DEFAULT false NOT NULL,
+  sponsorship_coverage text DEFAULT 'PARTIAL' NOT NULL,
+  is_gift_donation boolean DEFAULT false NOT NULL,
+  gift_honoree_name text,
+  gift_message text,
+  amount_minor integer NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  status text DEFAULT 'PLEDGED' NOT NULL,
+  originated_from_ai_match boolean DEFAULT false NOT NULL,
+  match_suggestion_id uuid REFERENCES public.sponsorship_match_suggestions(id) ON DELETE SET NULL,
+  notes text,
+  confirmed_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.payment_transactions (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  donation_id uuid NOT NULL REFERENCES public.donations(id),
+  provider text NOT NULL,
+  idempotency_key text NOT NULL UNIQUE,
+  checkout_request_id text UNIQUE,
+  mpesa_receipt_number text UNIQUE,
+  phone_e164 text,
+  amount_minor integer NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  verification_status text DEFAULT 'INITIATED' NOT NULL,
+  raw_callback_hash text,
+  failure_reason text,
+  verified_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.fund_allocations (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  fund_id uuid NOT NULL REFERENCES public.humanitarian_funds(id),
+  need_request_id uuid REFERENCES public.need_requests(id),
+  beneficiary_id uuid REFERENCES public.beneficiary_profiles(id),
+  project_title text NOT NULL,
+  allocated_amount_minor integer NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  approved_by uuid NOT NULL REFERENCES public.users(id),
+  status text DEFAULT 'APPROVED' NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.disbursements (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  pathway text NOT NULL,
+  fund_allocation_id uuid REFERENCES public.fund_allocations(id),
+  sponsorship_id uuid,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id),
+  amount_minor integer NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  channel text NOT NULL,
+  external_reference text,
+  approved_by uuid NOT NULL REFERENCES public.users(id),
+  status text DEFAULT 'SCHEDULED' NOT NULL,
+  disbursed_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.sponsorships (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  supporter_id uuid NOT NULL REFERENCES public.supporter_profiles(id),
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id),
+  need_request_id uuid REFERENCES public.need_requests(id),
+  monthly_amount_minor integer NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  status text DEFAULT 'PENDING_FIRST_PAYMENT' NOT NULL,
+  originated_from_ai_match boolean DEFAULT false NOT NULL,
+  match_suggestion_id uuid REFERENCES public.sponsorship_match_suggestions(id) ON DELETE SET NULL,
+  started_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.recurring_schedules (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  agreement_reference text NOT NULL UNIQUE,
+  supporter_id uuid NOT NULL REFERENCES public.supporter_profiles(id),
+  pathway text NOT NULL,
+  sponsorship_id uuid REFERENCES public.sponsorships(id),
+  fund_id uuid REFERENCES public.humanitarian_funds(id),
+  amount_minor integer NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  cadence text DEFAULT 'MONTHLY' NOT NULL,
+  custom_interval_days integer,
+  payment_method text DEFAULT 'MPESA_DARAJA' NOT NULL,
+  supporter_consent_granted boolean DEFAULT true NOT NULL,
+  supporter_consent_at timestamptz DEFAULT now() NOT NULL,
+  payment_authorised boolean DEFAULT false NOT NULL,
+  start_date timestamptz DEFAULT now() NOT NULL,
+  end_date timestamptz,
+  next_charge_at timestamptz NOT NULL,
+  last_run_at timestamptz,
+  failed_attempts integer DEFAULT 0 NOT NULL,
+  last_failure_reason text,
+  renewal_mode text DEFAULT 'MANUAL_CONFIRM' NOT NULL,
+  beneficiary_reassessment_due_at timestamptz,
+  status text DEFAULT 'ACTIVE' NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.safeguarding_incidents (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  beneficiary_id uuid REFERENCES public.beneficiary_profiles(id),
+  reported_by_user_id uuid NOT NULL REFERENCES public.users(id),
+  assigned_admin_id uuid REFERENCES public.users(id),
+  severity text DEFAULT 'HIGH' NOT NULL,
+  category text NOT NULL,
+  summary_enc text NOT NULL,
+  status text DEFAULT 'OPEN' NOT NULL,
+  resolution_notes text,
+  resolved_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.community_projects (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  fund_id uuid NOT NULL REFERENCES public.humanitarian_funds(id),
+  title text NOT NULL,
+  county text NOT NULL,
+  country_code text DEFAULT 'KE' NOT NULL,
+  summary text NOT NULL,
+  cover_image_path text,
+  target_amount_minor integer NOT NULL,
+  raised_amount_minor integer DEFAULT 0 NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  beneficiaries_impacted integer DEFAULT 0 NOT NULL,
+  status text DEFAULT 'ACTIVE' NOT NULL,
+  lead_officer_id uuid REFERENCES public.users(id),
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.volunteer_assignments (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES public.users(id),
+  assignment_type text NOT NULL,
+  county text NOT NULL,
+  project_id uuid REFERENCES public.community_projects(id),
+  beneficiary_id uuid REFERENCES public.beneficiary_profiles(id),
+  skills_summary text NOT NULL,
+  scheduled_date text NOT NULL,
+  status text DEFAULT 'ASSIGNED' NOT NULL,
+  field_report_notes text,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.empowerment_milestones (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  pathway_name text NOT NULL,
+  module_title text NOT NULL,
+  completion_pct integer DEFAULT 0 NOT NULL,
+  micro_grant_status text DEFAULT 'ELIGIBLE_IN_TRAINING' NOT NULL,
+  mentor_user_id uuid REFERENCES public.users(id),
+  updated_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.saved_beneficiaries (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  supporter_id uuid NOT NULL REFERENCES public.supporter_profiles(id) ON DELETE CASCADE,
+  beneficiary_id uuid NOT NULL REFERENCES public.beneficiary_profiles(id) ON DELETE CASCADE,
+  note text,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_supporter_beneficiary ON public.saved_beneficiaries USING btree (supporter_id, beneficiary_id);
+
+CREATE TABLE IF NOT EXISTS public.ledger_entries (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  journal_group_id uuid NOT NULL,
+  pathway text NOT NULL,
+  account_code text NOT NULL,
+  account_name text NOT NULL,
+  debit_minor integer DEFAULT 0 NOT NULL,
+  credit_minor integer DEFAULT 0 NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  reference_type text NOT NULL,
+  reference_id uuid NOT NULL,
+  description text NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.financial_approvals (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  operation_type text NOT NULL,
+  pathway text NOT NULL,
+  target_entity_id uuid NOT NULL,
+  amount_minor integer NOT NULL,
+  currency text DEFAULT 'KES' NOT NULL,
+  maker_user_id uuid NOT NULL REFERENCES public.users(id),
+  checker_user_id uuid REFERENCES public.users(id),
+  reason text NOT NULL,
+  status text DEFAULT 'PENDING_CHECKER' NOT NULL,
+  decided_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.talksasa_sms_logs (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  dispatch_ref text NOT NULL UNIQUE,
+  idempotency_key text UNIQUE,
+  user_id uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  template_code text DEFAULT 'GENERAL' NOT NULL,
+  sender_id text DEFAULT 'HUMANITY' NOT NULL,
+  recipient_msisdn text NOT NULL,
+  recipient_masked text NOT NULL,
+  message_preview text NOT NULL,
+  message_length integer DEFAULT 0 NOT NULL,
+  sms_units integer DEFAULT 1 NOT NULL,
+  provider_uid text,
+  delivery_status text DEFAULT 'QUEUED' NOT NULL,
+  http_status integer,
+  attempt_count integer DEFAULT 1 NOT NULL,
+  error_reason text,
+  provider_response_json jsonb,
+  sent_at timestamptz,
+  delivered_at timestamptz,
+  created_at timestamptz DEFAULT now() NOT NULL,
+  updated_at timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.talksasa_webhook_events (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  sms_log_id uuid REFERENCES public.talksasa_sms_logs(id) ON DELETE SET NULL,
+  provider_uid text,
+  event_type text DEFAULT 'DLR' NOT NULL,
+  delivery_status text NOT NULL,
+  signature_verified boolean DEFAULT false NOT NULL,
+  payload_json jsonb NOT NULL,
+  received_at timestamptz DEFAULT now() NOT NULL
+);
+
 COMMIT;

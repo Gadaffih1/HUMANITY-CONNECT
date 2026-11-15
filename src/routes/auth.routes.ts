@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
 import { eq, and, desc, isNull, gt, ne, sql, or } from 'drizzle-orm';
-import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
+import { db, isTransientDbError, toSafeClientErrorMessage, withDbRetry } from '../db/index.ts';
 import { provisionSuperAdmin } from '../db/superAdmin.ts';
 import { ensureRegistrationSchemaReady } from '../db/registrationSchema.ts';
 import {
@@ -641,7 +641,7 @@ authRouter.post('/login', async (req, res) => {
     const pgCode = err?.code || err?.cause?.code;
     if (pgCode === '42P01' || pgCode === '42703') {
       return res.status(500).json({
-        error: `Database schema requires synchronization (${err?.message || pgCode}).`,
+        error: 'Database schema requires synchronization. Please retry shortly or contact support.',
       });
     }
     if (pgCode === '28P01' || pgCode === '28000') {
@@ -650,7 +650,7 @@ authRouter.post('/login', async (req, res) => {
       });
     }
     res.status(500).json({
-      error: err?.message ? `Login failed: ${err.message}` : 'Login failed.',
+      error: toSafeClientErrorMessage(err, 'Unable to sign in right now. Please try again.'),
     });
   }
 });

@@ -196,3 +196,33 @@ export async function checkDatabaseHealth(): Promise<{
     };
   }
 }
+
+export function toSafeClientErrorMessage(err: unknown, fallback: string): string {
+  if (!err || typeof err !== 'object') return fallback;
+  const msg = typeof (err as { message?: unknown }).message === 'string'
+    ? (err as { message: string }).message.trim()
+    : '';
+  if (!msg) return fallback;
+
+  const lower = msg.toLowerCase();
+  const looksLikeSqlOrInternal =
+    lower.includes('failed query:') ||
+    lower.includes('select "') ||
+    lower.includes('insert into') ||
+    lower.includes('update "') ||
+    lower.includes('delete from') ||
+    lower.includes('relation "') ||
+    lower.includes('column "') ||
+    lower.includes('constraint "') ||
+    lower.includes('pg_') ||
+    lower.includes('econnrefused') ||
+    lower.includes('etimedout') ||
+    lower.includes('password authentication') ||
+    lower.includes('params:');
+
+  if (looksLikeSqlOrInternal || isTransientDbError(err)) {
+    return fallback;
+  }
+  return msg;
+}
+

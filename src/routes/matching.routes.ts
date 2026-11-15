@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { eq, and, desc, sql } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, isTransientDbError, toSafeClientErrorMessage, withDbRetry } from '../db/index.ts';
+import { ensureMatchingSchemaReady } from '../db/registrationSchema.ts';
 import {
   supporterProfiles,
   organisations,
@@ -31,22 +32,27 @@ export const matchingRouter = Router();
 matchingRouter.use(requireAuth);
 
 async function ensureSupporterForUser(userId: string, fullName: string, activeRole: string) {
-  const [existing] = await db
-    .select()
-    .from(supporterProfiles)
-    .where(eq(supporterProfiles.userId, userId))
-    .limit(1);
+  await ensureMatchingSchemaReady().catch(() => {});
+  const [existing] = await withDbRetry(() =>
+    db
+      .select()
+      .from(supporterProfiles)
+      .where(eq(supporterProfiles.userId, userId))
+      .limit(1)
+  );
   if (existing) return existing;
 
-  const [created] = await db
-    .insert(supporterProfiles)
-    .values({
-      userId,
-      supporterType: activeRole === 'WELL_WISHER' ? 'WELL_WISHER' : 'SUPPORTIVE',
-      displayName: fullName,
-      preferredCurrency: 'KES',
-    })
-    .returning();
+  const [created] = await withDbRetry(() =>
+    db
+      .insert(supporterProfiles)
+      .values({
+        userId,
+        supporterType: activeRole === 'WELL_WISHER' ? 'WELL_WISHER' : 'SUPPORTIVE',
+        displayName: fullName,
+        preferredCurrency: 'KES',
+      })
+      .returning()
+  );
   return created;
 }
 
@@ -109,9 +115,11 @@ matchingRouter.get('/suggested', async (req: AuthRequest, res) => {
   try {
     const result = await handleSuggestedMatches(req);
     res.json(result);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Matching suggested error:', err);
-    res.status(500).json({ error: err.message || 'Unable to generate suggested sponsorship matches.' });
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: toSafeClientErrorMessage(err, 'Unable to generate suggested sponsorship matches. Please try again shortly.'),
+    });
   }
 });
 
@@ -135,9 +143,11 @@ matchingRouter.get('/suggested/:beneficiaryId/why', async (req: AuthRequest, res
       ip: req.ip,
     });
     res.json(explanation);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Matching explanation error:', err);
-    res.status(404).json({ error: err.message || 'Unable to generate match explanation.' });
+    res.status(isTransientDbError(err) ? 503 : 404).json({
+      error: toSafeClientErrorMessage(err, 'Unable to generate match explanation.'),
+    });
   }
 });
 
@@ -146,9 +156,11 @@ matchingRouter.get('/recommendations', async (req: AuthRequest, res) => {
   try {
     const result = await handleSuggestedMatches(req);
     res.json(result);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Matching recommendations error:', err);
-    res.status(500).json({ error: err.message || 'Unable to generate sponsorship recommendations.' });
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: toSafeClientErrorMessage(err, 'Unable to generate sponsorship recommendations. Please try again shortly.'),
+    });
   }
 });
 
@@ -227,9 +239,11 @@ matchingRouter.put('/preferences', async (req: AuthRequest, res) => {
     });
 
     res.json(refreshed);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Update matching preferences error:', err);
-    res.status(500).json({ error: err.message || 'Unable to save sponsor preferences.' });
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: toSafeClientErrorMessage(err, 'Unable to save sponsor preferences.'),
+    });
   }
 });
 
@@ -293,8 +307,11 @@ matchingRouter.post('/suggestions/reset-dismissed', async (req: AuthRequest, res
       refreshAi: true,
     });
     res.json(refreshed);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Unable to restore dismissed matches.' });
+  } catch (err: unknown) {
+    console.error('Restore dismissed matches error:', err);
+    res.status(isTransientDbError(err) ? 503 : 500).json({
+      error: toSafeClientErrorMessage(err, 'Unable to restore dismissed matches.'),
+    });
   }
 });
 

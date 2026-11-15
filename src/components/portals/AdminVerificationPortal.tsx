@@ -170,7 +170,9 @@ export const AdminVerificationPortal: React.FC = () => {
       county?: string | null;
       subCounty?: string | null;
       ward?: string | null;
+      preferredLanguage?: string;
       approvalStatus: string;
+      suspensionReason?: string | null;
       emailVerified: boolean;
       phoneVerified: boolean;
       mfaEnabled: boolean;
@@ -179,16 +181,53 @@ export const AdminVerificationPortal: React.FC = () => {
       roles: string[];
       beneficiaryClassification?: string | null;
       beneficiaryRef?: string | null;
+      displayAlias?: string | null;
+      vulnerabilitySummary?: string | null;
+      guardianOrgName?: string | null;
+      guardianRelationship?: string | null;
+      isMinorCase?: boolean;
+      verificationLevel?: string | null;
+      verificationStatus?: string | null;
+      safeguardingCleared?: boolean;
+      publicListingApproved?: boolean;
+      monthlyNeedTargetMinor?: number | null;
+      ageGroup?: string | null;
+      caseNumber?: string | null;
+      caseStage?: string | null;
+      supporterType?: string | null;
+      supporterDisplayName?: string | null;
+      preferredCurrency?: string | null;
+      anonymousGiving?: boolean;
+      organisationName?: string | null;
+      organisationType?: string | null;
+      organisationStatus?: string | null;
     }>;
   } | null>(null);
   const [dirSearch, setDirSearch] = useState('');
   const [dirCountyFilter, setDirCountyFilter] = useState('ALL');
   const [dirRoleFilter, setDirRoleFilter] = useState('ALL');
   const [dirRefreshing, setDirRefreshing] = useState(false);
+  const [selectedAccountRecord, setSelectedAccountRecord] = useState<any | null>(null);
 
   const loadOffline = async () => {
     const items = await listEncryptedOfflineRecords(token);
     setOfflineRecords(items);
+  };
+
+  const refreshUsersDirectory = async (showFeedback = false) => {
+    if (!user?.roles.includes('SUPER_ADMIN')) return;
+    setDirRefreshing(true);
+    try {
+      const fresh = await apiFetch<any>('/api/admin/users-directory');
+      setUsersDirectory(fresh);
+      if (showFeedback) {
+        setFeedback(`Refreshed directory: ${fresh.totalCount} registered accounts loaded from PostgreSQL.`);
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Unable to load registered accounts directory.');
+    } finally {
+      setDirRefreshing(false);
+    }
   };
 
   const loadAll = async () => {
@@ -262,6 +301,12 @@ export const AdminVerificationPortal: React.FC = () => {
       window.removeEventListener('offline', onOffline);
     };
   }, []);
+
+  useEffect(() => {
+    if (tab === 'accounts' && user?.roles.includes('SUPER_ADMIN') && !usersDirectory && !dirRefreshing) {
+      refreshUsersDirectory(false);
+    }
+  }, [tab, user?.roles]);
 
   const [exportingDump, setExportingDump] = useState(false);
 
@@ -353,6 +398,15 @@ export const AdminVerificationPortal: React.FC = () => {
           { id: 'field-ops', label: 'Field Ops (Offline Vault)', tone: 'hc-btn-moss' },
           { id: 'staff-centre', label: 'Staff, Org & HR Centre', tone: 'hc-btn-plum' },
           { id: 'governance', label: 'RBAC, Templates & Audits', tone: 'hc-btn-slate' },
+          ...(user?.roles.includes('SUPER_ADMIN')
+            ? [
+                {
+                  id: 'accounts',
+                  label: `Registered Accounts (${usersDirectory?.totalCount ?? adminData?.users?.length ?? 0})`,
+                  tone: 'hc-btn-green',
+                },
+              ]
+            : []),
         ].map((item) => {
           const isActive = tab === item.id;
           return (
@@ -2192,7 +2246,7 @@ export const AdminVerificationPortal: React.FC = () => {
         </div>
       )}
 
-      {/* 8. Super Admin Only: Registered User Accounts Directory (Name, Contact, County & Sub-County) */}
+      {/* 8. Super Admin Only: Registered User Accounts Directory (All Registration & Profile Fields) */}
       {tab === 'accounts' && user?.roles.includes('SUPER_ADMIN') && (() => {
         const allUsers = usersDirectory?.users || [];
         const distinctCounties = Array.from(
@@ -2223,6 +2277,11 @@ export const AdminVerificationPortal: React.FC = () => {
             u.subCounty || '',
             u.ward || '',
             u.beneficiaryRef || '',
+            u.caseNumber || '',
+            u.guardianRelationship || '',
+            u.guardianOrgName || '',
+            u.organisationName || '',
+            u.vulnerabilitySummary || '',
             ...(u.roles || []),
           ]
             .join(' ')
@@ -2233,15 +2292,33 @@ export const AdminVerificationPortal: React.FC = () => {
         const exportRows = filteredUsers.map((u, idx) => ({
           No: idx + 1,
           Name: u.fullName,
+          DisplayAlias: u.displayAlias || u.supporterDisplayName || '',
           Phone: u.phoneE164 || '',
           Email: u.email,
+          Language: u.preferredLanguage || 'en',
+          Country: u.countryCode,
           County: u.county || '',
           SubCounty: u.subCounty || '',
           Ward: u.ward || '',
           Roles: (u.roles || []).join('; '),
+          BeneficiaryCategory: u.beneficiaryClassification || '',
+          BeneficiaryRef: u.beneficiaryRef || '',
+          CaseNumber: u.caseNumber || '',
+          CaseStage: u.caseStage || '',
+          VerificationLevel: u.verificationLevel || '',
+          VerificationStatus: u.verificationStatus || '',
+          GuardianRelationship: u.guardianRelationship || '',
+          GuardianOrg: u.guardianOrgName || '',
+          MinorCase: u.isMinorCase ? 'Yes' : 'No',
+          SupporterType: u.supporterType || '',
+          OrganisationName: u.organisationName || '',
+          OrganisationType: u.organisationType || '',
+          PreferredCurrency: u.preferredCurrency || '',
+          VulnerabilitySummary: u.vulnerabilitySummary || '',
           Status: u.approvalStatus,
           EmailVerified: u.emailVerified ? 'Yes' : 'No',
           PhoneVerified: u.phoneVerified ? 'Yes' : 'No',
+          MfaEnabled: u.mfaEnabled ? 'Yes' : 'No',
           RegisteredAt: new Date(u.createdAt).toLocaleString('en-KE'),
         }));
 
@@ -2258,11 +2335,11 @@ export const AdminVerificationPortal: React.FC = () => {
                     Super Admin Exclusively Authorised Directory
                   </div>
                   <h3 className="text-xl font-extrabold text-[#102E36]">
-                    All Registered User Accounts — Name, Contact, County &amp; Sub-County
+                    All Registered User Accounts — Full Registration &amp; Profile Registry
                   </h3>
                   <p className="text-xs text-[#4A636A]">
-                    Live PostgreSQL registry of every individual, beneficiary, guardian, supporter, well-wisher,
-                    and officer account created on the platform across all browsers.
+                    Live PostgreSQL registry of every account category created on the platform across all browsers,
+                    including contact info, location, guardian/organisation details, vulnerability notes, and verification status.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -2270,19 +2347,7 @@ export const AdminVerificationPortal: React.FC = () => {
                     size="sm"
                     variant="ivory"
                     disabled={dirRefreshing}
-                    onClick={async () => {
-                      setDirRefreshing(true);
-                      setErrorMsg(null);
-                      try {
-                        const fresh = await apiFetch<any>('/api/admin/users-directory');
-                        setUsersDirectory(fresh);
-                        setFeedback(`Refreshed directory: ${fresh.totalCount} registered accounts loaded from PostgreSQL.`);
-                      } catch (err: any) {
-                        setErrorMsg(err.message || 'Unable to refresh registered accounts directory.');
-                      } finally {
-                        setDirRefreshing(false);
-                      }
-                    }}
+                    onClick={() => refreshUsersDirectory(true)}
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${dirRefreshing ? 'animate-spin' : ''}`} />
                     {dirRefreshing ? 'Refreshing...' : 'Refresh Directory'}
@@ -2314,7 +2379,7 @@ export const AdminVerificationPortal: React.FC = () => {
               <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end text-xs">
                 <div className="md:col-span-5">
                   <label className="block font-semibold text-[#102E36] mb-1">
-                    Search Name, Contact, County, or Sub-County
+                    Search Name, Contact, County, Organisation, or Case Ref
                   </label>
                   <div className="relative">
                     <Search className="w-4 h-4 text-[#4A636A] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -2322,7 +2387,7 @@ export const AdminVerificationPortal: React.FC = () => {
                       type="text"
                       value={dirSearch}
                       onChange={(e) => setDirSearch(e.target.value)}
-                      placeholder="e.g. Jane, +2547, Nairobi, Westlands..."
+                      placeholder="e.g. Jane, +2547, Nairobi, Guardian, Foundation..."
                       className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-white border border-[#102E36]/15 text-sm"
                     />
                   </div>
@@ -2392,16 +2457,18 @@ export const AdminVerificationPortal: React.FC = () => {
                       <th className="py-3 px-3.5 font-bold">#</th>
                       <th className="py-3 px-3.5 font-bold">Name &amp; Category</th>
                       <th className="py-3 px-3.5 font-bold">Contact (Phone &amp; Email)</th>
-                      <th className="py-3 px-3.5 font-bold">County</th>
-                      <th className="py-3 px-3.5 font-bold">Sub-County</th>
-                      <th className="py-3 px-3.5 font-bold">Status &amp; Registered</th>
+                      <th className="py-3 px-3.5 font-bold">Location (County / Sub-County)</th>
+                      <th className="py-3 px-3.5 font-bold">Registration Profile Details</th>
+                      <th className="py-3 px-3.5 font-bold">Status &amp; Record</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#102E36]/10">
                     {filteredUsers.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="py-10 px-4 text-center text-sm text-[#4A636A]">
-                          No registered accounts match your current search or filters.
+                          {dirRefreshing
+                            ? 'Loading registered user accounts from PostgreSQL...'
+                            : 'No registered accounts match your current search or filters.'}
                         </td>
                       </tr>
                     ) : (
@@ -2421,7 +2488,8 @@ export const AdminVerificationPortal: React.FC = () => {
                             </div>
                             {u.beneficiaryRef && (
                               <div className="text-[11px] font-mono-num text-[#4A636A] mt-0.5">
-                                Case Ref: {u.beneficiaryRef}
+                                Ref: {u.beneficiaryRef}
+                                {u.verificationLevel ? ` · ${u.verificationLevel}` : ''}
                               </div>
                             )}
                           </td>
@@ -2435,21 +2503,57 @@ export const AdminVerificationPortal: React.FC = () => {
                               <span className="break-all">{u.email}</span>
                             </div>
                           </td>
-                          <td className="py-3.5 px-3.5 align-top">
+                          <td className="py-3.5 px-3.5 align-top space-y-0.5">
                             <div className="inline-flex items-center gap-1 font-semibold text-[#102E36]">
                               <MapPin className="w-3.5 h-3.5 text-[#287A59] shrink-0" />
                               <span>{u.county || 'Not specified'}</span>
                             </div>
-                          </td>
-                          <td className="py-3.5 px-3.5 align-top">
-                            <div className="font-medium text-[#102E36]">
-                              {u.subCounty || 'Not specified'}
+                            <div className="text-[11px] text-[#102E36]">
+                              Sub-County: {u.subCounty || 'Not specified'}
                             </div>
                             {u.ward && (
                               <div className="text-[11px] text-[#4A636A]">Ward: {u.ward}</div>
                             )}
                           </td>
-                          <td className="py-3.5 px-3.5 align-top space-y-0.5">
+                          <td className="py-3.5 px-3.5 align-top space-y-1 max-w-[260px]">
+                            {u.guardianRelationship && (
+                              <div className="text-[11px] text-[#102E36]">
+                                <strong>Guardian:</strong> {u.guardianRelationship}
+                                {u.guardianOrgName ? ` (${u.guardianOrgName})` : ''}
+                              </div>
+                            )}
+                            {!u.guardianRelationship && u.guardianOrgName && (
+                              <div className="text-[11px] text-[#102E36]">
+                                <strong>Welfare Org:</strong> {u.guardianOrgName}
+                              </div>
+                            )}
+                            {u.organisationName && (
+                              <div className="text-[11px] text-[#102E36]">
+                                <strong>Organisation:</strong> {u.organisationName}
+                                {u.organisationType ? ` (${u.organisationType})` : ''}
+                              </div>
+                            )}
+                            {u.supporterType && !u.organisationName && (
+                              <div className="text-[11px] text-[#102E36]">
+                                <strong>Supporter Type:</strong> {u.supporterType}
+                              </div>
+                            )}
+                            {u.vulnerabilitySummary && (
+                              <div className="text-[11px] text-[#4A636A] line-clamp-2">
+                                {u.vulnerabilitySummary}
+                              </div>
+                            )}
+                            {!u.guardianRelationship &&
+                              !u.guardianOrgName &&
+                              !u.organisationName &&
+                              !u.supporterType &&
+                              !u.vulnerabilitySummary && (
+                                <span className="text-[11px] text-[#4A636A]">
+                                  Core identity account
+                                </span>
+                              )}
+                          </td>
+                          <td className="py-3.5 px-3.5 align-top space-y-1">
                             <div
                               className={`font-bold ${
                                 u.approvalStatus === 'ACTIVE'
@@ -2468,6 +2572,13 @@ export const AdminVerificationPortal: React.FC = () => {
                             <div className="text-[11px] font-mono-num text-[#4A636A]">
                               {new Date(u.createdAt).toLocaleDateString('en-KE')}
                             </div>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedAccountRecord(u)}
+                              className="mt-1 inline-block text-[11px] font-semibold text-[#287A59] underline hover:text-[#102E36]"
+                            >
+                              View Full Details
+                            </button>
                           </td>
                         </tr>
                       ))
@@ -2476,6 +2587,114 @@ export const AdminVerificationPortal: React.FC = () => {
                 </table>
               </div>
             </div>
+
+            <ModalDialog
+              open={Boolean(selectedAccountRecord)}
+              title={selectedAccountRecord ? `Registered Account Record — ${selectedAccountRecord.fullName}` : ''}
+              subtitle="Complete registration and verification metadata persisted in PostgreSQL."
+              onClose={() => setSelectedAccountRecord(null)}
+            >
+              {selectedAccountRecord && (
+                <div className="space-y-4 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 rounded-xl bg-[#FAF9F6] border border-[#102E36]/12">
+                    <div>
+                      <div className="text-[#4A636A]">Full Legal Name</div>
+                      <div className="font-bold text-[#102E36]">{selectedAccountRecord.fullName}</div>
+                    </div>
+                    <div>
+                      <div className="text-[#4A636A]">Assigned Categories / Roles</div>
+                      <div className="font-semibold text-[#287A59]">
+                        {(selectedAccountRecord.roles || []).join(', ') || 'None'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#4A636A]">Email Address</div>
+                      <div className="font-mono-num break-all text-[#102E36]">
+                        {selectedAccountRecord.email} ({selectedAccountRecord.emailVerified ? 'Verified' : 'Unverified'})
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#4A636A]">Telephone Number</div>
+                      <div className="font-mono-num text-[#102E36]">
+                        {selectedAccountRecord.phoneE164 || 'Not provided'} ({selectedAccountRecord.phoneVerified ? 'Verified' : 'Unverified'})
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#4A636A]">Country / County / Sub-County / Ward</div>
+                      <div className="text-[#102E36]">
+                        {selectedAccountRecord.countryCode} · {selectedAccountRecord.county || '—'} /{' '}
+                        {selectedAccountRecord.subCounty || '—'}
+                        {selectedAccountRecord.ward ? ` / ${selectedAccountRecord.ward}` : ''}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#4A636A]">Approval Status &amp; MFA</div>
+                      <div className="text-[#102E36]">
+                        {selectedAccountRecord.approvalStatus} · MFA: {selectedAccountRecord.mfaEnabled ? 'Enabled' : 'Disabled'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#4A636A]">Registered Timestamp</div>
+                      <div className="font-mono-num text-[#102E36]">
+                        {new Date(selectedAccountRecord.createdAt).toLocaleString('en-KE')}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#4A636A]">Last Login</div>
+                      <div className="font-mono-num text-[#102E36]">
+                        {selectedAccountRecord.lastLoginAt
+                          ? new Date(selectedAccountRecord.lastLoginAt).toLocaleString('en-KE')
+                          : 'Never'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {selectedAccountRecord.beneficiaryRef && (
+                    <div className="p-3.5 rounded-xl bg-white border border-[#102E36]/12 space-y-2">
+                      <div className="font-bold text-[#102E36]">Beneficiary / Guardian Intake Data</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div><strong>Beneficiary Ref:</strong> {selectedAccountRecord.beneficiaryRef}</div>
+                        <div><strong>Classification:</strong> {selectedAccountRecord.beneficiaryClassification}</div>
+                        <div><strong>Display Alias:</strong> {selectedAccountRecord.displayAlias || '—'}</div>
+                        <div><strong>Verification:</strong> {selectedAccountRecord.verificationLevel} ({selectedAccountRecord.verificationStatus})</div>
+                        <div><strong>Case Number / Stage:</strong> {selectedAccountRecord.caseNumber || '—'} ({selectedAccountRecord.caseStage || '—'})</div>
+                        <div><strong>Minor Case:</strong> {selectedAccountRecord.isMinorCase ? 'Yes' : 'No'}</div>
+                        <div><strong>Guardian Relationship:</strong> {selectedAccountRecord.guardianRelationship || '—'}</div>
+                        <div><strong>Guardian Welfare Org:</strong> {selectedAccountRecord.guardianOrgName || '—'}</div>
+                      </div>
+                      {selectedAccountRecord.vulnerabilitySummary && (
+                        <div>
+                          <strong>Vulnerability Summary:</strong>
+                          <p className="mt-1 p-2.5 rounded-lg bg-[#FAF9F6] text-[#102E36] whitespace-pre-wrap">
+                            {selectedAccountRecord.vulnerabilitySummary}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(selectedAccountRecord.supporterType || selectedAccountRecord.organisationName) && (
+                    <div className="p-3.5 rounded-xl bg-white border border-[#102E36]/12 space-y-2">
+                      <div className="font-bold text-[#102E36]">Supporter / Well Wisher Profile Data</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div><strong>Supporter Type:</strong> {selectedAccountRecord.supporterType || '—'}</div>
+                        <div><strong>Display Name:</strong> {selectedAccountRecord.supporterDisplayName || '—'}</div>
+                        <div><strong>Preferred Currency:</strong> {selectedAccountRecord.preferredCurrency || 'KES'}</div>
+                        <div><strong>Organisation Name:</strong> {selectedAccountRecord.organisationName || '—'}</div>
+                        <div><strong>Organisation Type:</strong> {selectedAccountRecord.organisationType || '—'}</div>
+                        <div><strong>Organisation Status:</strong> {selectedAccountRecord.organisationStatus || '—'}</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedAccountRecord.suspensionReason && (
+                    <div className="p-3 rounded-xl bg-[#9F2D20]/10 border border-[#9F2D20]/25 text-[#9F2D20]">
+                      <strong>Suspension / Governance Reason:</strong> {selectedAccountRecord.suspensionReason}
+                    </div>
+                  )}
+                </div>
+              )}
+            </ModalDialog>
           </div>
         );
       })()}

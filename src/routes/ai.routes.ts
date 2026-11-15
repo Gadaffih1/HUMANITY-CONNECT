@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
+import { toSafeClientErrorMessage } from '../db/index.ts';
 import { assistHumanitarianText } from '../lib/gemini.ts';
 
 export const aiRouter = Router();
@@ -47,8 +48,10 @@ aiRouter.post('/assist', requireAuth, async (req: AuthRequest, res) => {
       },
     });
     res.json(result);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('AI assist error:', err);
-    res.status(502).json({ error: err.message || 'AI assistance service temporarily unavailable.' });
+    res.status(502).json({
+      error: toSafeClientErrorMessage(err, 'AI assistance service temporarily unavailable.'),
+    });
   }
 });
