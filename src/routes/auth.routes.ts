@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import { eq, and, desc, isNull, gt, ne } from 'drizzle-orm';
+import { eq, and, desc, isNull, gt, ne, sql, or } from 'drizzle-orm';
 import { db, isTransientDbError, withDbRetry } from '../db/index.ts';
 import { provisionSuperAdmin } from '../db/superAdmin.ts';
 import { ensureSupporterRegistrationSchema } from '../db/registrationSchema.ts';
@@ -128,24 +128,37 @@ authRouter.post('/register', async (req, res) => {
       db
         .select({ id: users.id })
         .from(users)
-        .where(eq(users.email, normalizedEmail))
+        .where(sql`lower(trim(${users.email})) = ${normalizedEmail}`)
         .limit(1)
     );
     if (existingEmail) {
-      return res.status(409).json({ error: 'An account with this email already exists.' });
+      return res.status(409).json({
+        error: 'An account with this email address already exists. Only one account can be registered per email.',
+      });
     }
 
-    if (normalizedPhone?.ok) {
+    const phoneDigits = normalizedPhone?.ok ? normalizedPhone.e164.replace(/\D/g, '') : null;
+    const phoneLocalDigits = phoneDigits && phoneDigits.startsWith('254') ? `0${phoneDigits.slice(3)}` : null;
+
+    if (normalizedPhone?.ok && phoneDigits) {
       const [existingPhone] = await withDbRetry(() =>
         db
           .select({ id: users.id })
           .from(users)
-          .where(eq(users.phoneE164, normalizedPhone.e164))
+          .where(
+            or(
+              eq(users.phoneE164, normalizedPhone.e164),
+              sql`regexp_replace(coalesce(${users.phoneE164}, ''), '[^0-9]', '', 'g') = ${phoneDigits}`,
+              ...(phoneLocalDigits
+                ? [sql`regexp_replace(coalesce(${users.phoneE164}, ''), '[^0-9]', '', 'g') = ${phoneLocalDigits}`]
+                : [])
+            )
+          )
           .limit(1)
       );
       if (existingPhone) {
         return res.status(409).json({
-          error: 'An account with this phone number is already registered. Please sign in instead.',
+          error: 'An account with this phone number already exists. Only one account can be registered per phone number.',
         });
       }
     }
@@ -161,6 +174,42 @@ authRouter.post('/register', async (req, res) => {
     const phoneOtp = normalizedPhone?.ok ? generateNumericOtp(6) : undefined;
 
     const { newUser, token } = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(174501, 11)`);
+
+      const [txEmailDup] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(sql`lower(trim(${users.email})) = ${normalizedEmail}`)
+        .limit(1);
+      if (txEmailDup) {
+        throw Object.assign(new Error('Duplicate email'), {
+          code: '23505',
+          constraint: 'users_email_unique',
+        });
+      }
+
+      if (normalizedPhone?.ok && phoneDigits) {
+        const [txPhoneDup] = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(
+            or(
+              eq(users.phoneE164, normalizedPhone.e164),
+              sql`regexp_replace(coalesce(${users.phoneE164}, ''), '[^0-9]', '', 'g') = ${phoneDigits}`,
+              ...(phoneLocalDigits
+                ? [sql`regexp_replace(coalesce(${users.phoneE164}, ''), '[^0-9]', '', 'g') = ${phoneLocalDigits}`]
+                : [])
+            )
+          )
+          .limit(1);
+        if (txPhoneDup) {
+          throw Object.assign(new Error('Duplicate phone'), {
+            code: '23505',
+            constraint: 'users_phone_e164_unique',
+          });
+        }
+      }
+
       const [insertedUser] = await tx
         .insert(users)
         .values({
@@ -370,7 +419,12 @@ authRouter.post('/register', async (req, res) => {
     if (cause.code === '23505') {
       if (cause.constraint?.toLowerCase().includes('phone')) {
         return res.status(409).json({
-          error: 'An account with this phone number already exists.',
+          error: 'An account with this phone number already exists. Only one account can be registered per phone number.',
+        });
+      }
+      if (cause.constraint?.toLowerCase().includes('email')) {
+        return res.status(409).json({
+          error: 'An account with this email address already exists. Only one account can be registered per email.',
         });
       }
       return res.status(409).json({ error: 'An account with these details already exists.' });
@@ -411,7 +465,7 @@ authRouter.post('/login', async (req, res) => {
     }
 
     if (!userRow || !userRow.passwordHash) {
-      return res.status(401).json({ error: 'Invalid credentials or Google Sign-In account.' });
+      return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
     if (userRow.approvalStatus === 'SUSPENDED') {

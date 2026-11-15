@@ -4,7 +4,6 @@ import {
   Smartphone,
   Mail,
   Building2,
-  UserCheck,
   AlertCircle,
   Lock,
   Eye,
@@ -29,7 +28,7 @@ export const AuthScreens: React.FC<{
   onSuccess: () => void;
   onOpenSuperAdmin?: () => void;
 }> = ({ initialMode = 'login', presetRole = 'SUPPORTIVE', onSuccess, onOpenSuperAdmin }) => {
-  const { signInWithGoogle, loginWithPassword, registerAccount, apiFetch } = useAuth();
+  const { loginWithPassword, registerAccount, apiFetch } = useAuth();
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>(initialMode);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
@@ -84,19 +83,6 @@ export const AuthScreens: React.FC<{
     ['ORPHAN_GUARDIAN', 'DESTITUTE', 'NEEDY'].includes(r)
   );
   const isWellWisherSelected = selectedRoles.includes('WELL_WISHER');
-
-  const handleGoogleSignIn = async () => {
-    setBusy(true);
-    setFeedback(null);
-    try {
-      await signInWithGoogle();
-      onSuccess();
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message || 'Google Sign-In failed.' });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const handleLoginSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -284,24 +270,6 @@ export const AuthScreens: React.FC<{
 
           {mode === 'login' && (
             <div className="space-y-5">
-              <GlossyButton
-                type="button"
-                variant="ivory"
-                size="lg"
-                className="w-full"
-                disabled={busy}
-                onClick={handleGoogleSignIn}
-              >
-                <UserCheck className="w-4 h-4 text-[#287A59]" />
-                Continue with Google Sign-In
-              </GlossyButton>
-
-              <div className="flex items-center gap-3 text-xs text-[#4A636A]">
-                <div className="h-px flex-1 bg-[#102E36]/10" />
-                <span>or sign in with email & password</span>
-                <div className="h-px flex-1 bg-[#102E36]/10" />
-              </div>
-
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div>
                   <label htmlFor="auth-login-email" className="block text-xs font-semibold text-[#102E36] mb-1.5">

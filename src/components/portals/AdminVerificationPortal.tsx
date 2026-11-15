@@ -303,35 +303,6 @@ export const AdminVerificationPortal: React.FC = () => {
             Verification, Needs Triage, Finance & Safeguarding Command
           </h2>
         </div>
-
-        <div className="flex flex-wrap items-center gap-2.5">
-          {user?.roles.includes('SUPER_ADMIN') && (
-            <>
-              <GlossyButton
-                size="sm"
-                variant={tab === 'accounts' ? 'green' : 'teal'}
-                onClick={() => setTab(tab === 'accounts' ? 'verification' : 'accounts')}
-              >
-                <Users className="w-3.5 h-3.5" />
-                Registered Accounts ({usersDirectory?.totalCount ?? adminData?.users?.length ?? 0})
-              </GlossyButton>
-              <GlossyButton
-                size="sm"
-                variant="gold"
-                disabled={exportingDump}
-                onClick={downloadPgDump}
-              >
-                <Download className="w-3.5 h-3.5" />
-                {exportingDump ? 'Exporting SQL...' : 'Download PostgreSQL Dump (.sql)'}
-              </GlossyButton>
-            </>
-          )}
-          <ExportReportBar
-            title="Humanity Connect Monthly Financial & Audit Report"
-            rows={monthlyReport?.journalEntries || []}
-            csvFilename="humanity-connect-monthly-ledger.csv"
-          />
-        </div>
       </div>
 
       {needsMfaStepUp && (
@@ -831,6 +802,17 @@ export const AdminVerificationPortal: React.FC = () => {
       {/* 3. Finance & Safaricom Daraja M-Pesa */}
       {tab === 'finance' && (
         <div className="space-y-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-[#287A59]">Double-Entry Financial Control</div>
+              <h3 className="text-lg font-bold text-[#102E36]">Monthly Ledger & Safaricom Daraja Settlement</h3>
+            </div>
+            <ExportReportBar
+              title="Humanity Connect Monthly Financial & Audit Report"
+              rows={monthlyReport?.journalEntries || []}
+              csvFilename="humanity-connect-monthly-ledger.csv"
+            />
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="hc-card p-5">
               <div className="text-xs text-[#4A636A]">Verified Received Money</div>

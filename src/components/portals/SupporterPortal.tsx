@@ -13,11 +13,15 @@ import {
   Sparkles,
   HelpCircle,
   TrendingUp,
+  BarChart3,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -26,6 +30,11 @@ import {
 } from 'recharts';
 import { useAuth } from '../../context/AuthContext';
 import { MPESA_ACCOUNT, MPESA_PAYBILL } from '../../lib/mpesaDestination';
+import { ConfettiBurst } from '../ui/ConfettiBurst';
+import {
+  buildMonthlyDonationTrends,
+  computeSupporterImpactMetrics,
+} from '../../lib/supporterAnalytics';
 import {
   GlossyButton,
   BeneficiaryProfileCard,
@@ -122,6 +131,11 @@ export const SupporterPortal: React.FC<{
   const [isGift, setIsGift] = useState(false);
   const [giftHonoree, setGiftHonoree] = useState('');
   const [pendingStk, setPendingStk] = useState<{ checkoutRequestId: string; amountMinor: number } | null>(null);
+  const [stkStatus, setStkStatus] = useState<{
+    status: 'CALLBACK_PENDING' | 'VERIFIED' | 'FAILED';
+    mpesaReceiptNumber?: string | null;
+  } | null>(null);
+  const [showConfetti, setShowConfetti] = useState(false);
   const [paymentBusy, setPaymentBusy] = useState(false);
 
   // Volunteer & Safe Message state
@@ -171,6 +185,45 @@ export const SupporterPortal: React.FC<{
   useEffect(() => {
     loadAll();
   }, []);
+
+  const checkPendingStkStatus = async (checkoutRequestId: string) => {
+    try {
+      const res = await apiFetch<{
+        verificationStatus: string;
+        mpesaReceiptNumber?: string | null;
+      }>('/api/payments/mpesa/stk-query', {
+        method: 'POST',
+        body: JSON.stringify({ checkoutRequestId }),
+      });
+      if (res.verificationStatus === 'VERIFIED') {
+        setStkStatus({
+          status: 'VERIFIED',
+          mpesaReceiptNumber: res.mpesaReceiptNumber ?? null,
+        });
+        setShowConfetti(true);
+        setFeedback(
+          res.mpesaReceiptNumber
+            ? `M-Pesa payment confirmed (Receipt: ${res.mpesaReceiptNumber}). Thank you for supporting Humanity Connect!`
+            : 'M-Pesa payment confirmed. Thank you for supporting Humanity Connect!'
+        );
+        await loadAll();
+      } else if (res.verificationStatus === 'FAILED') {
+        setStkStatus({ status: 'FAILED' });
+      }
+    } catch {
+      // Transient polling ignore; manual button & next interval will retry
+    }
+  };
+
+  useEffect(() => {
+    if (!pendingStk || stkStatus?.status === 'VERIFIED' || stkStatus?.status === 'FAILED') {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      checkPendingStkStatus(pendingStk.checkoutRequestId);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [pendingStk?.checkoutRequestId, stkStatus?.status]);
 
   const openCheckoutFromMatch = (match: MatchRecommendationItem, suggestedAmountKes: number) => {
     const publicBen = publicCases.find((c) => c.id === match.beneficiaryId);
@@ -247,9 +300,12 @@ export const SupporterPortal: React.FC<{
 
   const confirmedDonations = (portal?.donations || []).filter((d: any) => d.status === 'CONFIRMED');
   const pledgedDonations = (portal?.donations || []).filter((d: any) => d.status === 'PLEDGED');
+  const monthlyDonationTrends = buildMonthlyDonationTrends(portal?.donations || []);
+  const totalImpactMetrics = computeSupporterImpactMetrics(portal?.donations || [], impactTimeline);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+      <ConfettiBurst active={showConfetti} onComplete={() => setShowConfetti(false)} />
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="text-xs font-semibold text-[#287A59]">Supportive Portal</div>
@@ -346,83 +402,163 @@ export const SupporterPortal: React.FC<{
             </div>
           </div>
 
-          {/* Impact Over Time (Recharts Cumulative Area Chart) */}
-          <div className="hc-card p-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="text-xs font-semibold text-[#287A59] flex items-center gap-1.5">
-                  <TrendingUp className="w-3.5 h-3.5 text-[#D9A84E]" />
-                  Verified Humanitarian Trajectory
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Impact Over Time (Recharts Cumulative Area Chart) */}
+            <div className="hc-card p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-[#287A59] flex items-center gap-1.5">
+                    <TrendingUp className="w-3.5 h-3.5 text-[#D9A84E]" />
+                    Verified Humanitarian Trajectory
+                  </div>
+                  <h3 className="text-lg font-bold text-[#102E36]">Impact Over Time</h3>
                 </div>
-                <h3 className="text-lg font-bold text-[#102E36]">Impact Over Time</h3>
+                <span className="text-xs font-mono-num text-[#4A636A]">
+                  Disbursed vs Approved Targets (KES)
+                </span>
               </div>
-              <span className="text-xs font-mono-num text-[#4A636A]">
-                Cumulative Settled Disbursements vs Human-Approved Targets (KES)
-              </span>
+
+              {impactTimeline.length === 0 ? (
+                <div className="p-6 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10 text-xs text-[#4A636A] text-center">
+                  No settled disbursements or human-approved funding targets recorded yet.
+                </div>
+              ) : (
+                <div className="w-full h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={impactTimeline.map((pt) => ({
+                        month: pt.month,
+                        disbursedKes: Math.round(pt.disbursedMinor / 100),
+                        targetKes: Math.round(pt.targetMinor / 100),
+                      }))}
+                      margin={{ top: 10, right: 16, left: 4, bottom: 0 }}
+                    >
+                      <defs>
+                        <linearGradient id="hcDisbursedGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#287A59" stopOpacity={0.35} />
+                          <stop offset="95%" stopColor="#287A59" stopOpacity={0.02} />
+                        </linearGradient>
+                        <linearGradient id="hcTargetGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#D9A84E" stopOpacity={0.28} />
+                          <stop offset="95%" stopColor="#D9A84E" stopOpacity={0.02} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#102E36" strokeOpacity={0.1} />
+                      <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#4A636A' }} />
+                      <YAxis
+                        tick={{ fontSize: 11, fill: '#4A636A' }}
+                        tickFormatter={(v) => `${Math.round(Number(v) / 1000)}k`}
+                      />
+                      <Tooltip
+                        formatter={(val: any, name: any) => [
+                          `KES ${Number(val || 0).toLocaleString('en-KE')}`,
+                          name === 'disbursedKes' ? 'Settled Disbursements' : 'Approved Need Targets',
+                        ]}
+                      />
+                      <Legend
+                        formatter={(value) =>
+                          value === 'disbursedKes' ? 'Settled Disbursements (KES)' : 'Approved Need Targets (KES)'
+                        }
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="targetKes"
+                        stroke="#D9A84E"
+                        strokeWidth={2}
+                        fillOpacity={1}
+                        fill="url(#hcTargetGrad)"
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="disbursedKes"
+                        stroke="#287A59"
+                        strokeWidth={2.5}
+                        fillOpacity={1}
+                        fill="url(#hcDisbursedGrad)"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
             </div>
 
-            {impactTimeline.length === 0 ? (
-              <div className="p-6 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10 text-xs text-[#4A636A] text-center">
-                No settled disbursements or human-approved funding targets recorded yet.
+            {/* Monthly Donation Trends & Total Impact Metrics (Recharts BarChart) */}
+            <div className="hc-card p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-[#287A59] flex items-center gap-1.5">
+                    <BarChart3 className="w-3.5 h-3.5 text-[#D9A84E]" />
+                    Monthly Giving & Impact Metrics
+                  </div>
+                  <h3 className="text-lg font-bold text-[#102E36]">Monthly Donation Trends</h3>
+                </div>
+                <span className="text-xs font-mono-num text-[#4A636A]">
+                  Coverage: {totalImpactMetrics.impactCoveragePct}%
+                </span>
               </div>
-            ) : (
-              <div className="w-full h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart
-                    data={impactTimeline.map((pt) => ({
-                      month: pt.month,
-                      disbursedKes: Math.round(pt.disbursedMinor / 100),
-                      targetKes: Math.round(pt.targetMinor / 100),
-                    }))}
-                    margin={{ top: 10, right: 16, left: 4, bottom: 0 }}
-                  >
-                    <defs>
-                      <linearGradient id="hcDisbursedGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#287A59" stopOpacity={0.35} />
-                        <stop offset="95%" stopColor="#287A59" stopOpacity={0.02} />
-                      </linearGradient>
-                      <linearGradient id="hcTargetGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#D9A84E" stopOpacity={0.28} />
-                        <stop offset="95%" stopColor="#D9A84E" stopOpacity={0.02} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#102E36" strokeOpacity={0.1} />
-                    <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#4A636A' }} />
-                    <YAxis
-                      tick={{ fontSize: 11, fill: '#4A636A' }}
-                      tickFormatter={(v) => `${Math.round(Number(v) / 1000)}k`}
-                    />
-                    <Tooltip
-                      formatter={(val: any, name: any) => [
-                        `KES ${Number(val || 0).toLocaleString('en-KE')}`,
-                        name === 'disbursedKes' ? 'Settled Disbursements' : 'Approved Need Targets',
-                      ]}
-                    />
-                    <Legend
-                      formatter={(value) =>
-                        value === 'disbursedKes' ? 'Settled Disbursements (KES)' : 'Approved Need Targets (KES)'
-                      }
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="targetKes"
-                      stroke="#D9A84E"
-                      strokeWidth={2}
-                      fillOpacity={1}
-                      fill="url(#hcTargetGrad)"
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="disbursedKes"
-                      stroke="#287A59"
-                      strokeWidth={2.5}
-                      fillOpacity={1}
-                      fill="url(#hcDisbursedGrad)"
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="p-2.5 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                  <div className="text-[11px] text-[#4A636A]">Settled Giving</div>
+                  <div className="text-sm font-extrabold font-mono-num text-[#287A59]">
+                    KES {totalImpactMetrics.totalSettledKes.toLocaleString('en-KE')}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                  <div className="text-[11px] text-[#4A636A]">Pledged</div>
+                  <div className="text-sm font-extrabold font-mono-num text-[#B6721A]">
+                    KES {totalImpactMetrics.totalPledgedKes.toLocaleString('en-KE')}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                  <div className="text-[11px] text-[#4A636A]">Network Disbursed</div>
+                  <div className="text-sm font-extrabold font-mono-num text-[#102E36]">
+                    KES {totalImpactMetrics.totalDisbursedImpactKes.toLocaleString('en-KE')}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10">
+                  <div className="text-[11px] text-[#4A636A]">Need Target Cap</div>
+                  <div className="text-sm font-extrabold font-mono-num text-[#102E36]">
+                    KES {totalImpactMetrics.totalApprovedTargetKes.toLocaleString('en-KE')}
+                  </div>
+                </div>
               </div>
-            )}
+
+              {monthlyDonationTrends.length === 0 ? (
+                <div className="p-6 rounded-xl bg-[#FAF9F6] border border-[#102E36]/10 text-xs text-[#4A636A] text-center">
+                  Your monthly settled and pledged contribution bars will appear here once you make your first contribution or pledge.
+                </div>
+              ) : (
+                <div className="w-full h-56">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={monthlyDonationTrends}
+                      margin={{ top: 10, right: 16, left: 4, bottom: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#102E36" strokeOpacity={0.1} />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#4A636A' }} />
+                      <YAxis
+                        tick={{ fontSize: 11, fill: '#4A636A' }}
+                        tickFormatter={(v) => `${Math.round(Number(v) / 1000)}k`}
+                      />
+                      <Tooltip
+                        formatter={(val: any, name: any) => [
+                          `KES ${Number(val || 0).toLocaleString('en-KE')}`,
+                          name === 'settledKes' ? 'Settled Contributions' : 'Open Pledges',
+                        ]}
+                      />
+                      <Legend
+                        formatter={(value) =>
+                          value === 'settledKes' ? 'Settled (KES)' : 'Pledged (KES)'
+                        }
+                      />
+                      <Bar dataKey="settledKes" fill="#287A59" radius={[6, 6, 0, 0]} />
+                      <Bar dataKey="pledgedKes" fill="#D9A84E" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Proactive AI Match Suggestions on Supporter Dashboard */}
@@ -1008,6 +1144,7 @@ export const SupporterPortal: React.FC<{
         onClose={() => {
           setCheckoutTarget(null);
           setPendingStk(null);
+          setStkStatus(null);
         }}
       >
         {checkoutTarget && !pendingStk && (
@@ -1152,6 +1289,7 @@ export const SupporterPortal: React.FC<{
                     }),
                   });
                   if (payMode === 'MPESA_STK' && res.paymentTx?.checkoutRequestId) {
+                    setStkStatus({ status: 'CALLBACK_PENDING' });
                     setPendingStk({
                       checkoutRequestId: res.paymentTx.checkoutRequestId,
                       amountMinor,
@@ -1175,20 +1313,67 @@ export const SupporterPortal: React.FC<{
 
         {pendingStk && (
           <div className="space-y-4">
-            <div className="p-4 rounded-xl bg-[#EAE6DC]/60 text-sm space-y-2">
-              <div className="font-bold text-[#102E36]">Awaiting Server-Side Daraja Callback</div>
+            <div
+              className={`p-4 rounded-xl text-sm space-y-2 border ${
+                stkStatus?.status === 'VERIFIED'
+                  ? 'bg-[#287A59]/10 border-[#287A59]/30'
+                  : stkStatus?.status === 'FAILED'
+                    ? 'bg-[#9F2D20]/10 border-[#9F2D20]/25'
+                    : 'bg-[#EAE6DC]/60 border-[#102E36]/10'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-bold text-[#102E36]">
+                {stkStatus?.status === 'VERIFIED' && (
+                  <CheckCircle2 className="w-5 h-5 text-[#287A59] shrink-0" />
+                )}
+                <span>
+                  {stkStatus?.status === 'VERIFIED'
+                    ? 'M-Pesa Donation Verified & Settled!'
+                    : stkStatus?.status === 'FAILED'
+                      ? 'M-Pesa Payment Not Completed'
+                      : 'Awaiting Server-Side Daraja Callback'}
+                </span>
+              </div>
+              <div className="text-xs font-mono-num text-[#102E36] font-semibold">
+                Paybill: {MPESA_PAYBILL} · Account: {MPESA_ACCOUNT} · Amount: {formatMoney(pendingStk.amountMinor, 'KES')}
+              </div>
               <div className="text-xs font-mono-num text-[#4A636A]">
                 CheckoutRequestID: {pendingStk.checkoutRequestId}
               </div>
+              {stkStatus?.mpesaReceiptNumber && (
+                <div className="text-xs font-mono-num font-bold text-[#287A59]">
+                  M-Pesa Receipt: {stkStatus.mpesaReceiptNumber}
+                </div>
+              )}
               <p className="text-xs text-[#4A636A]">
-                Check your phone for the M-Pesa prompt. Your contribution remains pending until the provider confirms it.
+                {stkStatus?.status === 'VERIFIED'
+                  ? 'Your contribution has been credited to the ring-fenced trust ledger.'
+                  : stkStatus?.status === 'FAILED'
+                    ? 'The STK prompt was declined or expired. No funds were deducted.'
+                    : 'Check your phone for the M-Pesa prompt. Your contribution remains pending until the provider confirms it.'}
               </p>
             </div>
-            <GlossyButton variant="ivory" onClick={async () => {
-              setPendingStk(null);
-              setCheckoutTarget(null);
-              await loadAll();
-            }}>Close</GlossyButton>
+            <div className="flex flex-wrap gap-2">
+              {stkStatus?.status !== 'VERIFIED' && (
+                <GlossyButton
+                  variant="teal"
+                  onClick={() => checkPendingStkStatus(pendingStk.checkoutRequestId)}
+                >
+                  Check Payment Status
+                </GlossyButton>
+              )}
+              <GlossyButton
+                variant="ivory"
+                onClick={async () => {
+                  setPendingStk(null);
+                  setStkStatus(null);
+                  setCheckoutTarget(null);
+                  await loadAll();
+                }}
+              >
+                Close
+              </GlossyButton>
+            </div>
           </div>
         )}
       </ModalDialog>

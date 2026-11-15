@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { MPESA_ACCOUNT, MPESA_PAYBILL } from '../../lib/mpesaDestination';
+import { ConfettiBurst } from '../ui/ConfettiBurst';
 import {
   GlossyButton,
   SponsorshipCard,
@@ -78,6 +79,11 @@ export const CorporatePortal: React.FC = () => {
   const [fundPayMode, setFundPayMode] = useState<'MPESA_STK' | 'PLEDGE_ONLY'>('MPESA_STK');
   const [fundPhone, setFundPhone] = useState(user?.phoneE164 || '+254712345678');
   const [pendingStk, setPendingStk] = useState<{ checkoutRequestId: string; amountMinor: number } | null>(null);
+  const [stkStatus, setStkStatus] = useState<{
+    status: 'CALLBACK_PENDING' | 'VERIFIED' | 'FAILED';
+    mpesaReceiptNumber?: string | null;
+  } | null>(null);
+  const [showConfetti, setShowConfetti] = useState(false);
   const [paymentBusy, setPaymentBusy] = useState(false);
 
   // AI Impact brief & Dynamic Sponsorship Matching
@@ -131,6 +137,45 @@ export const CorporatePortal: React.FC = () => {
     loadAll();
   }, []);
 
+  const checkPendingStkStatus = async (checkoutRequestId: string) => {
+    try {
+      const res = await apiFetch<{
+        verificationStatus: string;
+        mpesaReceiptNumber?: string | null;
+      }>('/api/payments/mpesa/stk-query', {
+        method: 'POST',
+        body: JSON.stringify({ checkoutRequestId }),
+      });
+      if (res.verificationStatus === 'VERIFIED') {
+        setStkStatus({
+          status: 'VERIFIED',
+          mpesaReceiptNumber: res.mpesaReceiptNumber ?? null,
+        });
+        setShowConfetti(true);
+        setFeedback(
+          res.mpesaReceiptNumber
+            ? `M-Pesa institutional contribution verified (Receipt: ${res.mpesaReceiptNumber}).`
+            : 'M-Pesa institutional contribution verified.'
+        );
+        await loadAll();
+      } else if (res.verificationStatus === 'FAILED') {
+        setStkStatus({ status: 'FAILED' });
+      }
+    } catch {
+      // Transient poll error ignored until next interval or manual check
+    }
+  };
+
+  useEffect(() => {
+    if (!pendingStk || stkStatus?.status === 'VERIFIED' || stkStatus?.status === 'FAILED') {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      checkPendingStkStatus(pendingStk.checkoutRequestId);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [pendingStk?.checkoutRequestId, stkStatus?.status]);
+
   const donations = overview?.donations || [];
   const confirmedDonations = donations.filter((d: any) => d.status === 'CONFIRMED');
   const pledgedDonations = donations.filter((d: any) => d.status === 'PLEDGED');
@@ -164,6 +209,7 @@ export const CorporatePortal: React.FC = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+      <ConfettiBurst active={showConfetti} onComplete={() => setShowConfetti(false)} />
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="text-xs font-semibold text-[#287A59]">
@@ -957,6 +1003,7 @@ export const CorporatePortal: React.FC = () => {
         onClose={() => {
           setFundCheckout(null);
           setPendingStk(null);
+          setStkStatus(null);
         }}
       >
         {fundCheckout && !pendingStk && (
@@ -1018,6 +1065,7 @@ export const CorporatePortal: React.FC = () => {
                   }),
                 });
                 if (fundPayMode === 'MPESA_STK' && res.paymentTx?.checkoutRequestId) {
+                  setStkStatus({ status: 'CALLBACK_PENDING' });
                   setPendingStk({ checkoutRequestId: res.paymentTx.checkoutRequestId, amountMinor });
                 } else {
                   setFundCheckout(null);
@@ -1039,18 +1087,67 @@ export const CorporatePortal: React.FC = () => {
 
         {pendingStk && (
           <div className="space-y-4 text-sm">
-            <div className="p-4 rounded-xl bg-[#EAE6DC]/60 space-y-1">
-              <div className="font-bold text-[#102E36]">Daraja Callback Pending</div>
+            <div
+              className={`p-4 rounded-xl space-y-1.5 border ${
+                stkStatus?.status === 'VERIFIED'
+                  ? 'bg-[#287A59]/10 border-[#287A59]/30'
+                  : stkStatus?.status === 'FAILED'
+                    ? 'bg-[#9F2D20]/10 border-[#9F2D20]/25'
+                    : 'bg-[#EAE6DC]/60 border-[#102E36]/10'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-bold text-[#102E36]">
+                {stkStatus?.status === 'VERIFIED' && (
+                  <CheckCircle2 className="w-5 h-5 text-[#287A59] shrink-0" />
+                )}
+                <span>
+                  {stkStatus?.status === 'VERIFIED'
+                    ? 'M-Pesa Donation Verified & Settled!'
+                    : stkStatus?.status === 'FAILED'
+                      ? 'M-Pesa Payment Not Completed'
+                      : 'Daraja Callback Pending'}
+                </span>
+              </div>
+              <div className="font-mono-num text-xs font-semibold text-[#102E36]">
+                Paybill: {MPESA_PAYBILL} · Account: {MPESA_ACCOUNT} · Amount: {formatMoney(pendingStk.amountMinor, 'KES')}
+              </div>
               <div className="font-mono-num text-xs text-[#4A636A]">
                 CheckoutRequestID: {pendingStk.checkoutRequestId}
               </div>
+              {stkStatus?.mpesaReceiptNumber && (
+                <div className="font-mono-num text-xs font-bold text-[#287A59]">
+                  M-Pesa Receipt: {stkStatus.mpesaReceiptNumber}
+                </div>
+              )}
             </div>
-            <p className="text-xs">Check your phone for the M-Pesa prompt. The contribution remains pending until provider confirmation.</p>
-            <GlossyButton variant="ivory" onClick={async () => {
-              setPendingStk(null);
-              setFundCheckout(null);
-              await loadAll();
-            }}>Close</GlossyButton>
+            <p className="text-xs">
+              {stkStatus?.status === 'VERIFIED'
+                ? 'Funds have been settled into the restricted humanitarian fund ledger.'
+                : stkStatus?.status === 'FAILED'
+                  ? 'The M-Pesa prompt was declined or expired.'
+                  : 'Check your phone for the M-Pesa prompt. The contribution remains pending until provider confirmation.'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {stkStatus?.status !== 'VERIFIED' && (
+                <GlossyButton
+                  variant="teal"
+                  onClick={() => checkPendingStkStatus(pendingStk.checkoutRequestId)}
+                >
+                  Check Payment Status
+                </GlossyButton>
+              )}
+              <GlossyButton
+                variant="ivory"
+                onClick={async () => {
+                  setPendingStk(null);
+                  setStkStatus(null);
+                  setFundCheckout(null);
+                  await loadAll();
+                }}
+              >
+                Close
+              </GlossyButton>
+            </div>
           </div>
         )}
       </ModalDialog>
@@ -1063,6 +1160,7 @@ export const CorporatePortal: React.FC = () => {
         onClose={() => {
           setDirectMatchCheckout(null);
           setPendingStk(null);
+          setStkStatus(null);
         }}
       >
         {directMatchCheckout && !pendingStk && (
@@ -1138,6 +1236,7 @@ export const CorporatePortal: React.FC = () => {
                     }),
                   });
                   if (directMatchCheckout.mode === 'MPESA_STK' && res.paymentTx?.checkoutRequestId) {
+                    setStkStatus({ status: 'CALLBACK_PENDING' });
                     setPendingStk({ checkoutRequestId: res.paymentTx.checkoutRequestId, amountMinor });
                   } else {
                     setDirectMatchCheckout(null);
@@ -1160,18 +1259,67 @@ export const CorporatePortal: React.FC = () => {
         )}
         {pendingStk && (
           <div className="space-y-4 text-sm">
-            <div className="p-4 rounded-xl bg-[#EAE6DC]/60 space-y-1">
-              <div className="font-bold text-[#102E36]">Daraja Callback Pending</div>
+            <div
+              className={`p-4 rounded-xl space-y-1.5 border ${
+                stkStatus?.status === 'VERIFIED'
+                  ? 'bg-[#287A59]/10 border-[#287A59]/30'
+                  : stkStatus?.status === 'FAILED'
+                    ? 'bg-[#9F2D20]/10 border-[#9F2D20]/25'
+                    : 'bg-[#EAE6DC]/60 border-[#102E36]/10'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-bold text-[#102E36]">
+                {stkStatus?.status === 'VERIFIED' && (
+                  <CheckCircle2 className="w-5 h-5 text-[#287A59] shrink-0" />
+                )}
+                <span>
+                  {stkStatus?.status === 'VERIFIED'
+                    ? 'M-Pesa Donation Verified & Settled!'
+                    : stkStatus?.status === 'FAILED'
+                      ? 'M-Pesa Payment Not Completed'
+                      : 'Daraja Callback Pending'}
+                </span>
+              </div>
+              <div className="font-mono-num text-xs font-semibold text-[#102E36]">
+                Paybill: {MPESA_PAYBILL} · Account: {MPESA_ACCOUNT} · Amount: {formatMoney(pendingStk.amountMinor, 'KES')}
+              </div>
               <div className="font-mono-num text-xs text-[#4A636A]">
                 CheckoutRequestID: {pendingStk.checkoutRequestId}
               </div>
+              {stkStatus?.mpesaReceiptNumber && (
+                <div className="font-mono-num text-xs font-bold text-[#287A59]">
+                  M-Pesa Receipt: {stkStatus.mpesaReceiptNumber}
+                </div>
+              )}
             </div>
-            <p className="text-xs">Check your phone for the M-Pesa prompt. The contribution remains pending until provider confirmation.</p>
-            <GlossyButton variant="ivory" onClick={async () => {
-              setPendingStk(null);
-              setDirectMatchCheckout(null);
-              await loadAll();
-            }}>Close</GlossyButton>
+            <p className="text-xs">
+              {stkStatus?.status === 'VERIFIED'
+                ? 'Your institutional sponsorship payment has been verified and recorded.'
+                : stkStatus?.status === 'FAILED'
+                  ? 'The M-Pesa prompt was declined or expired.'
+                  : 'Check your phone for the M-Pesa prompt. The contribution remains pending until provider confirmation.'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {stkStatus?.status !== 'VERIFIED' && (
+                <GlossyButton
+                  variant="teal"
+                  onClick={() => checkPendingStkStatus(pendingStk.checkoutRequestId)}
+                >
+                  Check Payment Status
+                </GlossyButton>
+              )}
+              <GlossyButton
+                variant="ivory"
+                onClick={async () => {
+                  setPendingStk(null);
+                  setStkStatus(null);
+                  setDirectMatchCheckout(null);
+                  await loadAll();
+                }}
+              >
+                Close
+              </GlossyButton>
+            </div>
           </div>
         )}
       </ModalDialog>

@@ -345,6 +345,9 @@ export const PublicLandingPage: React.FC<{
             Institutional partners, Well Wishers, and individual supporters strengthen entire communities
             through verified water, education, and cooperative empowerment projects.
           </p>
+          <p className="text-xs font-mono-num text-[#102E36] font-semibold">
+            M-Pesa Paybill: 400200 · Account: 1164798
+          </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">

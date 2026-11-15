@@ -22,6 +22,7 @@ import {
 import { requireAuth, type AuthRequest, writeAuditLog } from '../middleware/auth.ts';
 import { buildImpactTimeline } from '../lib/impactTimeline.ts';
 import { initiateMpesaStk, MpesaError, MpesaOutcomeUnknown } from '../lib/mpesa.ts';
+import { MPESA_ACCOUNT, MPESA_PAYBILL } from '../lib/mpesaDestination.ts';
 
 export const supporterRouter = Router();
 supporterRouter.use(requireAuth);
@@ -503,7 +504,12 @@ supporterRouter.post('/checkout', async (req: AuthRequest, res) => {
     if (result.initiationUnknown) {
       return res.status(502).json({ error: 'Payment request status is unknown. Check your phone and contact support before retrying.' });
     }
-    res.status(201).json(result);
+    res.status(201).json({
+      ...result,
+      ...(d.mode === 'MPESA_STK'
+        ? { destination: { paybill: MPESA_PAYBILL, account: MPESA_ACCOUNT } }
+        : {}),
+    });
   } catch (err) {
     console.error('Checkout error:', err);
     res.status(err instanceof MpesaError ? err.status : 500).json({

@@ -28,7 +28,7 @@ import { ADMIN_ACCESS_ROLE_CODES, ROLE_DEFINITIONS, type RoleCode } from './type
 type AppRoute = 'public' | 'staff' | 'auth' | 'portal' | 'security';
 
 const HumanityConnectShell: React.FC = () => {
-  const { user, loading, switchRole, loginWithPassword, signInWithGoogle, logout } = useAuth();
+  const { user, loading, switchRole, loginWithPassword, logout } = useAuth();
   const [route, setRoute] = useState<AppRoute>('public');
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
   const [presetRole, setPresetRole] = useState<string>('SUPPORTIVE');
@@ -493,31 +493,10 @@ const HumanityConnectShell: React.FC = () => {
               </button>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2.5 pt-1">
-            <GlossyButton type="submit" variant="teal" className="flex-1" disabled={spBusy}>
+          <div className="pt-1">
+            <GlossyButton type="submit" variant="teal" className="w-full" disabled={spBusy}>
               <Lock className="w-4 h-4" />
               {spBusy ? 'Signing In...' : 'Sign In as Super Admin'}
-            </GlossyButton>
-            <GlossyButton
-              type="button"
-              variant="ivory"
-              disabled={spBusy}
-              onClick={async () => {
-                setSpBusy(true);
-                setSpError(null);
-                try {
-                  await signInWithGoogle();
-                  setSpModalOpen(false);
-                  setSpShowPassword(false);
-                  setRoute('portal');
-                } catch (err: any) {
-                  setSpError(err.message || 'Google Sign-In failed.');
-                } finally {
-                  setSpBusy(false);
-                }
-              }}
-            >
-              Google Sign-In
             </GlossyButton>
           </div>
         </form>
