@@ -1558,6 +1558,24 @@ export const platformSettings = pgTable(
   (t) => [index('idx_platform_settings_cat').on(t.category)]
 );
 
+// 57. Official Organisational Department Directories (15 Approved Directories)
+export const staffDepartments = pgTable(
+  'staff_departments',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    departmentNumber: integer('department_number').notNull().unique(),
+    code: text('code').notNull().unique(),
+    name: text('name').notNull(),
+    plannedCount: integer('planned_count').notNull().default(0),
+    headJobId: text('head_job_id'),
+    workspaceFocus: text('workspace_focus').notNull().default(''),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('idx_staff_departments_num').on(t.departmentNumber, t.code)]
+);
+
 // Drizzle Relations
 export const usersRelations = relations(users, ({ many, one }) => ({
   userRoles: many(userRoles),

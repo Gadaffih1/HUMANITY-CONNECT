@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
-import { eq, desc, and, sql } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { eq, desc, and, sql, asc } from 'drizzle-orm';
+import { db, withDbRetry } from '../db/index.ts';
+import { ensureStaffEstablishmentDirectoryReady } from '../db/staffEstablishmentSchema.ts';
 import {
+  staffDepartments,
   staffPositions,
   staffPositionRevisions,
   staffVacancies,
@@ -32,7 +34,7 @@ import {
   writeAuditLog,
 } from '../middleware/auth.ts';
 import { decryptSensitiveText, encryptSensitiveText } from '../lib/crypto.ts';
-import { ORGANISATIONAL_DEPARTMENTS } from '../data/staffEstablishment.ts';
+import { ORGANISATIONAL_DEPARTMENTS, STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
 import {
   ADMIN_ACCESS_ROLE_CODES,
   APPLICATION_NEGATIVE_STATUSES,
@@ -96,17 +98,17 @@ function sanitizePublicPosition(pos: typeof staffPositions.$inferSelect) {
     jobTitle: pos.jobTitle,
     hierarchyLevel: pos.hierarchyLevel,
     reportsToJobId: pos.reportsToJobId,
-    independentOversight: pos.independentOversight,
+    independentOversight: Boolean(pos.independentOversight),
     jobDescription: pos.jobDescription,
-    mainResponsibilities: pos.mainResponsibilities,
-    dailyResponsibilities: pos.dailyResponsibilities,
-    weeklyResponsibilities: pos.weeklyResponsibilities,
-    monthlyResponsibilities: pos.monthlyResponsibilities,
+    mainResponsibilities: Array.isArray(pos.mainResponsibilities) ? pos.mainResponsibilities : [],
+    dailyResponsibilities: Array.isArray(pos.dailyResponsibilities) ? pos.dailyResponsibilities : [],
+    weeklyResponsibilities: Array.isArray(pos.weeklyResponsibilities) ? pos.weeklyResponsibilities : [],
+    monthlyResponsibilities: Array.isArray(pos.monthlyResponsibilities) ? pos.monthlyResponsibilities : [],
     requiredQualifications: pos.requiredQualifications,
     professionalQualifications: pos.professionalQualifications,
     requiredExperience: pos.requiredExperience,
-    professionalSkills: pos.professionalSkills,
-    communicationSkills: pos.communicationSkills,
+    professionalSkills: Array.isArray(pos.professionalSkills) ? pos.professionalSkills : [],
+    communicationSkills: Array.isArray(pos.communicationSkills) ? pos.communicationSkills : [],
     ethicalRequirements: pos.ethicalRequirements,
     safeguardingResponsibilities: pos.safeguardingResponsibilities,
     reportingOfficer: pos.reportingOfficer,
@@ -119,7 +121,7 @@ function sanitizePublicPosition(pos: typeof staffPositions.$inferSelect) {
     incumbentName: pos.incumbentName,
     actingOfficerName: pos.actingOfficerName,
     vacancyStatus: pos.vacancyStatus,
-    isVacancyPublished: pos.isVacancyPublished,
+    isVacancyPublished: Boolean(pos.isVacancyPublished),
     vacancyPublishedAt: pos.vacancyPublishedAt,
     revisionStatus: pos.revisionStatus,
     revisionVersion: pos.revisionVersion,
@@ -166,6 +168,53 @@ function canAccessDepartmentWorkspace(req: AuthRequest, deptNumber: number, user
 // 1. PUBLIC DIRECTORY, ORG CHART METADATA & JD DOWNLOAD (NO PRIVATE PII)
 // =========================================================================
 
+async function loadDirectoryEntitiesWithHealing() {
+  let deptRows: Array<typeof staffDepartments.$inferSelect> = [];
+  let posRows: Array<typeof staffPositions.$inferSelect> = [];
+
+  try {
+    [deptRows, posRows] = await withDbRetry(
+      () =>
+        Promise.all([
+          db.select().from(staffDepartments).orderBy(asc(staffDepartments.departmentNumber)),
+          db.select().from(staffPositions),
+        ]),
+      3
+    );
+  } catch (readErr: any) {
+    const code = readErr?.code || readErr?.cause?.code;
+    if (code === '42P01' || code === '42703') {
+      await ensureStaffEstablishmentDirectoryReady();
+      [deptRows, posRows] = await withDbRetry(
+        () =>
+          Promise.all([
+            db.select().from(staffDepartments).orderBy(asc(staffDepartments.departmentNumber)),
+            db.select().from(staffPositions),
+          ]),
+        3
+      );
+    } else {
+      throw readErr;
+    }
+  }
+
+  if (deptRows.length < ORGANISATIONAL_DEPARTMENTS.length || posRows.length < STAFF_ESTABLISHMENT_170.length) {
+    await ensureStaffEstablishmentDirectoryReady().catch((healErr) => {
+      console.warn('Staff establishment self-heal warning:', healErr);
+    });
+    [deptRows, posRows] = await withDbRetry(
+      () =>
+        Promise.all([
+          db.select().from(staffDepartments).orderBy(asc(staffDepartments.departmentNumber)),
+          db.select().from(staffPositions),
+        ]),
+      3
+    );
+  }
+
+  return { deptRows, posRows };
+}
+
 staffRouter.get('/public/directory', async (req, res) => {
   try {
     const deptFilter = req.query.departmentNumber ? Number(req.query.departmentNumber) : null;
@@ -173,19 +222,41 @@ staffRouter.get('/public/directory', async (req, res) => {
     const searchQ = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : '';
     const sortMode = typeof req.query.sort === 'string' ? req.query.sort : 'id_asc';
 
-    const allRows = await db.select().from(staffPositions);
-    const sanitizedAll = allRows.map(sanitizePublicPosition);
+    const { deptRows, posRows } = await loadDirectoryEntitiesWithHealing();
+    const sanitizedAll = posRows.map(sanitizePublicPosition);
 
-    const departmentSummary = ORGANISATIONAL_DEPARTMENTS.map((dept) => {
-      const deptRows = sanitizedAll.filter((p) => p.departmentNumber === dept.number);
-      const filled = deptRows.filter((p) => p.vacancyStatus === 'FILLED').length;
-      const acting = deptRows.filter((p) => p.vacancyStatus === 'ACTING').length;
-      const recruiting = deptRows.filter((p) => p.vacancyStatus === 'RECRUITING').length;
-      const vacant = deptRows.filter((p) => p.vacancyStatus === 'VACANT' || p.vacancyStatus === 'RECRUITING').length;
-      const fillRatePct = deptRows.length > 0 ? Math.round(((filled + acting) / deptRows.length) * 100) : 0;
+    const directorySources =
+      deptRows.length > 0
+        ? deptRows.map((d) => ({
+            number: d.departmentNumber,
+            name: d.name,
+            code: d.code,
+            plannedCount: d.plannedCount,
+            headJobId: d.headJobId,
+            workspaceFocus: d.workspaceFocus,
+          }))
+        : ORGANISATIONAL_DEPARTMENTS.map((d) => ({
+            number: d.number,
+            name: d.name,
+            code: d.code,
+            plannedCount: d.plannedCount,
+            headJobId: null as string | null,
+            workspaceFocus: d.name,
+          }));
+
+    const departmentSummary = directorySources.map((dept) => {
+      const deptPositions = sanitizedAll.filter((p) => p.departmentNumber === dept.number);
+      const filled = deptPositions.filter((p) => p.vacancyStatus === 'FILLED').length;
+      const acting = deptPositions.filter((p) => p.vacancyStatus === 'ACTING').length;
+      const recruiting = deptPositions.filter((p) => p.vacancyStatus === 'RECRUITING').length;
+      const vacant = deptPositions.filter(
+        (p) => p.vacancyStatus === 'VACANT' || p.vacancyStatus === 'RECRUITING'
+      ).length;
+      const fillRatePct =
+        deptPositions.length > 0 ? Math.round(((filled + acting) / deptPositions.length) * 100) : 0;
       return {
         ...dept,
-        approvedPositions: deptRows.length,
+        approvedPositions: deptPositions.length,
         filledPositions: filled,
         actingPositions: acting,
         recruitingPositions: recruiting,
@@ -206,9 +277,9 @@ staffRouter.get('/public/directory', async (req, res) => {
     });
 
     filtered = [...filtered].sort((a, b) => {
-      if (sortMode === 'title_asc') return a.jobTitle.localeCompare(b.jobTitle);
-      if (sortMode === 'title_desc') return b.jobTitle.localeCompare(a.jobTitle);
-      return a.jobId.localeCompare(b.jobId);
+      if (sortMode === 'title_asc') return (a.jobTitle || '').localeCompare(b.jobTitle || '');
+      if (sortMode === 'title_desc') return (b.jobTitle || '').localeCompare(a.jobTitle || '');
+      return (a.jobId || '').localeCompare(b.jobId || '');
     });
 
     const totalFilled = sanitizedAll.filter((p) => p.vacancyStatus === 'FILLED').length;
@@ -224,7 +295,7 @@ staffRouter.get('/public/directory', async (req, res) => {
         recruitingCount: totalRecruiting,
         vacantCount: totalVacant,
         publishedVacanciesCount: sanitizedAll.filter((p) => p.isVacancyPublished).length,
-        departmentsCount: ORGANISATIONAL_DEPARTMENTS.length,
+        departmentsCount: departmentSummary.length,
       },
       departments: departmentSummary,
       understaffedDepartments: departmentSummary.filter((d) => d.understaffed),
@@ -243,9 +314,47 @@ staffRouter.get('/public/directory', async (req, res) => {
         geographicalJurisdiction: p.geographicalJurisdiction,
       })),
     });
-  } catch (err) {
-    console.error('Staff directory error:', err);
+  } catch (err: any) {
+    console.error('Staff directory error:', {
+      message: err?.message,
+      code: err?.code || err?.cause?.code,
+      table: err?.table || err?.cause?.table,
+      column: err?.column || err?.cause?.column,
+    });
     res.status(500).json({ error: 'Unable to load staff establishment directory.' });
+  }
+});
+
+staffRouter.get('/public/departments', async (_req, res) => {
+  try {
+    const { deptRows, posRows } = await loadDirectoryEntitiesWithHealing();
+    const departments = deptRows.map((dept) => {
+      const deptPositions = posRows.filter((p) => p.departmentNumber === dept.departmentNumber);
+      const filledPositions = deptPositions.filter((p) => p.vacancyStatus === 'FILLED').length;
+      const actingPositions = deptPositions.filter((p) => p.vacancyStatus === 'ACTING').length;
+      const recruitingPositions = deptPositions.filter((p) => p.vacancyStatus === 'RECRUITING').length;
+      const vacantPositions = deptPositions.filter(
+        (p) => p.vacancyStatus === 'VACANT' || p.vacancyStatus === 'RECRUITING'
+      ).length;
+      return {
+        id: dept.id,
+        number: dept.departmentNumber,
+        code: dept.code,
+        name: dept.name,
+        plannedCount: dept.plannedCount,
+        headJobId: dept.headJobId,
+        workspaceFocus: dept.workspaceFocus,
+        approvedPositions: deptPositions.length,
+        filledPositions,
+        actingPositions,
+        recruitingPositions,
+        vacantPositions,
+      };
+    });
+    res.json({ departments, totalDepartments: departments.length });
+  } catch (err) {
+    console.error('Public departments error:', err);
+    res.status(500).json({ error: 'Unable to load organisational department directories.' });
   }
 });
 
@@ -254,11 +363,13 @@ staffRouter.get('/positions/:jobId/download', async (req, res) => {
   try {
     const jobId = String(req.params.jobId).trim().toUpperCase();
     const format = req.query.format === 'txt' ? 'txt' : 'html';
-    const [pos] = await db
-      .select()
-      .from(staffPositions)
-      .where(eq(staffPositions.jobId, jobId))
-      .limit(1);
+    const [pos] = await withDbRetry(() =>
+      db
+        .select()
+        .from(staffPositions)
+        .where(eq(staffPositions.jobId, jobId))
+        .limit(1)
+    );
     if (!pos) return res.status(404).json({ error: 'Approved position not found.' });
 
     if (format === 'txt') {
@@ -363,11 +474,14 @@ staffRouter.get('/positions/:jobId/download', async (req, res) => {
 // Public Published Vacancies (No applicant PII exposed)
 staffRouter.get('/public/vacancies', async (_req, res) => {
   try {
-    const published = await db
-      .select()
-      .from(staffVacancies)
-      .where(eq(staffVacancies.stage, 'PUBLISHED'))
-      .orderBy(desc(staffVacancies.publishedAt));
+    await loadDirectoryEntitiesWithHealing();
+    const published = await withDbRetry(() =>
+      db
+        .select()
+        .from(staffVacancies)
+        .where(eq(staffVacancies.stage, 'PUBLISHED'))
+        .orderBy(desc(staffVacancies.publishedAt))
+    );
     res.json({ vacancies: published });
   } catch (err) {
     console.error('Public vacancies error:', err);

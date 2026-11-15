@@ -25,6 +25,7 @@ import {
 } from './schema.ts';
 import { encryptSensitiveText, hashPassword, verifyPassword } from '../lib/crypto.ts';
 import { STAFF_ESTABLISHMENT_170 } from '../data/staffEstablishment.ts';
+import { ensureStaffEstablishmentDirectoryReady } from './staffEstablishmentSchema.ts';
 
 let seedPromise: Promise<void> | null = null;
 
@@ -313,6 +314,7 @@ async function runSeed(): Promise<void> {
         roles_count: number;
         perms_count: number;
         cats_count: number;
+        staff_dept_count: number;
         staff_count: number;
         vacancies_count: number;
         policies_count: number;
@@ -320,17 +322,20 @@ async function runSeed(): Promise<void> {
         has_sessions: boolean;
         has_user_perms: boolean;
         has_user_county: boolean;
+        has_staff_depts: boolean;
       }>(`
         SELECT
           (SELECT count(*)::int FROM roles) AS roles_count,
           (SELECT count(*)::int FROM permissions) AS perms_count,
           (SELECT count(*)::int FROM needs_categories) AS cats_count,
+          COALESCE((SELECT count(*)::int FROM staff_departments), 0) AS staff_dept_count,
           (SELECT count(*)::int FROM staff_positions) AS staff_count,
           (SELECT count(*)::int FROM staff_vacancies) AS vacancies_count,
           (SELECT count(*)::int FROM data_retention_policies) AS policies_count,
           (SELECT count(*)::int FROM platform_settings) AS settings_count,
           (to_regclass('public.user_sessions') IS NOT NULL) AS has_sessions,
           (to_regclass('public.user_permissions') IS NOT NULL) AS has_user_perms,
+          (to_regclass('public.staff_departments') IS NOT NULL) AS has_staff_depts,
           EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'county'
@@ -347,6 +352,16 @@ async function runSeed(): Promise<void> {
   ) {
     await ensureCoreAuthSchema().catch((schemaErr) => {
       console.warn('Core auth schema check warning:', schemaErr);
+    });
+  }
+
+  if (
+    !fastCheck?.rows?.[0]?.has_staff_depts ||
+    (fastCheck?.rows?.[0]?.staff_dept_count ?? 0) < 15 ||
+    (fastCheck?.rows?.[0]?.staff_count ?? 0) < STAFF_ESTABLISHMENT_170.length
+  ) {
+    await ensureStaffEstablishmentDirectoryReady().catch((staffInitErr) => {
+      console.warn('Staff establishment directory init warning:', staffInitErr);
     });
   }
 
@@ -1061,19 +1076,9 @@ async function runSeed(): Promise<void> {
     }
   }
 
-  // 6. Seed all 170 Approved Establishment Positions (zero fake employees or appointments)
+  // 6. Seed all 15 Department Directories & 170 Approved Establishment Positions (zero fake employees)
   try {
-    const [{ staffCount }] = await db
-      .select({ staffCount: sql<number>`count(*)::int` })
-      .from(staffPositions);
-    if (staffCount < STAFF_ESTABLISHMENT_170.length) {
-      for (const pos of STAFF_ESTABLISHMENT_170) {
-        await db
-          .insert(staffPositions)
-          .values(pos)
-          .onConflictDoNothing({ target: staffPositions.jobId });
-      }
-    }
+    await ensureStaffEstablishmentDirectoryReady();
   } catch (staffSeedErr) {
     console.warn('Non-fatal staff establishment seed skipped:', staffSeedErr);
   }
